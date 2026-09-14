@@ -84,6 +84,7 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
             -DCMAKE_OSX_SYSROOT="$(xcrun --sdk iphoneos --show-sdk-path)" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DTUNE_CPU=none \
             -DBUILD_TESTING=OFF \
             -DENABLE_LTO=OFF \
             -DENABLE_ASSERTIONS=OFF
