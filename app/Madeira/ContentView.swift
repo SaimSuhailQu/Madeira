@@ -2731,23 +2731,14 @@ struct TouchControlsOverlay: View {
     }
 }
 
-/// Shared glass backing, with the pre-26 fallback the codebase already uses.
+/// Shared glass backing using system ultraThinMaterial.
 struct GlassShape: View {
     var circle = false
     @ViewBuilder var body: some View {
-        if #available(iOS 26.0, *) {
-            if circle {
-                Circle().fill(.clear).glassEffect(.regular, in: Circle())
-            } else {
-                RoundedRectangle(cornerRadius: 18).fill(.clear)
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
-            }
+        if circle {
+            Circle().fill(.ultraThinMaterial)
         } else {
-            if circle {
-                Circle().fill(.ultraThinMaterial)
-            } else {
-                RoundedRectangle(cornerRadius: 18).fill(.ultraThinMaterial)
-            }
+            RoundedRectangle(cornerRadius: 18).fill(.ultraThinMaterial)
         }
     }
 }
