@@ -73,6 +73,22 @@ jobs:
             fi
           done
 
+      - name: Build FEX Core (iOS)
+        run: |
+          mkdir -p FEX/build-ios
+          cd FEX/build-ios
+          cmake .. -G Ninja \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+            -DCMAKE_OSX_SYSROOT="$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DENABLE_LTO=OFF \
+            -DENABLE_ASSERTIONS=OFF
+          ninja CONFIG_INC IR_INC FEXCore FEXCore_Base fmt cephes_128bit xxhash softfloat_3e JemallocLibs || ninja
+          cd ../..
+
       - name: Build App with Xcode
         run: |
           PROJ=$(find . -maxdepth 3 -name "*.xcodeproj" -o -name "*.xcworkspace" | head -n 1)
