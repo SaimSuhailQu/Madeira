@@ -4,10 +4,12 @@
 set -e
 
 NAME="${1:-fib}"
-TOOLCHAIN="/Users/willfaust/Documents/ios-pc-game-claude/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin"
-APP_BUNDLE="/Users/willfaust/Documents/ios-pc-game-claude/app/Madeira/arm64ec-windows"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$DIR/../.." && pwd)"
+TOOLCHAIN="$REPO_ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin"
+APP_BUNDLE="$REPO_ROOT/app/Madeira/arm64ec-windows"
 
-cd "$(dirname "$0")"
+cd "$DIR"
 
 echo "=== building $NAME.exe (x86_64 PE) ==="
 "$TOOLCHAIN/x86_64-w64-mingw32-clang" \

@@ -32,16 +32,20 @@ jobs:
           mkdir -p toolchains
           cd toolchains
           echo "Downloading llvm-mingw..."
-          # Fetch the latest macos-universal release of llvm-mingw
-          LLVM_URL=$(curl -s https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest | grep "browser_download_url.*ucrt-macos-universal.tar.xz" | cut -d '"' -f 4)
+          LLVM_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/llvm-mingw-20260421-ucrt-macos-universal.tar.xz"
           echo "Downloading from $LLVM_URL"
-          curl -L -o llvm-mingw.tar.xz "$LLVM_URL"
+          curl -fL -o llvm-mingw.tar.xz "$LLVM_URL" || {
+            echo "Direct download failed, querying latest release via GitHub API..."
+            API_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest | grep "browser_download_url.*ucrt-macos-universal.tar.xz" | cut -d '"' -f 4 | head -n 1)
+            echo "Downloading from fallback API URL: $API_URL"
+            curl -fL -o llvm-mingw.tar.xz "$API_URL"
+          }
           tar -xf llvm-mingw.tar.xz
           
           # Find extracted directory and alias/symlink to the expected name
           EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "llvm-mingw*" | head -n 1)
           echo "Extracted toolchain: $EXTRACTED_DIR"
-          ln -s "$EXTRACTED_DIR" llvm-mingw-20260421-ucrt-macos-universal
+          ln -sfn "$EXTRACTED_DIR" llvm-mingw-20260421-ucrt-macos-universal
           
           # Add to PATH
           echo "$(pwd)/$EXTRACTED_DIR/bin" >> $GITHUB_PATH
