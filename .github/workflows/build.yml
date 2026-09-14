@@ -1,0 +1,85 @@
+name: Build Madeira
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Build Dependencies
+        run: |
+          brew install cmake ninja pkg-config meson bison flex llvm
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+
+      - name: Run Native Build Scripts
+        run: |
+          chmod -R +x build scripts tools || true
+          
+          for dir in build/*/; do
+            if [ -f "${dir}build.sh" ]; then
+              echo "=== Building ${dir} ==="
+              bash "${dir}build.sh"
+            fi
+          done
+
+      - name: Build iOS App with xcodebuild
+        run: |
+          PROJ=$(find . -maxdepth 3 -name "*.xcodeproj" -o -name "*.xcworkspace" | head -n 1)
+          if [ -z "$PROJ" ]; then
+            echo "No root Xcode project found; searching app/..."
+            PROJ=$(find app -name "*.xcodeproj" -o -name "*.xcworkspace" | head -n 1)
+          fi
+          
+          echo "Found project: $PROJ"
+          
+          if [[ "$PROJ" == *.xcworkspace ]]; then
+            xcodebuild build \
+              -workspace "$PROJ" \
+              -scheme Madeira \
+              -configuration Release \
+              -destination 'generic/platform=iOS' \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              CONFIGURATION_BUILD_DIR=build_output
+          else
+            xcodebuild build \
+              -project "$PROJ" \
+              -scheme Madeira \
+              -configuration Release \
+              -destination 'generic/platform=iOS' \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              CONFIGURATION_BUILD_DIR=build_output
+          fi
+
+      - name: Package into IPA
+        run: |
+          mkdir -p Payload
+          cp -r build_output/*.app Payload/
+          zip -r Madeira.ipa Payload/
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-IPA
+          path: |
+            Madeira.ipa
+            build_output/*.app
