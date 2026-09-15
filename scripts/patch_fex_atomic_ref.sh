@@ -270,6 +270,47 @@ if [ -f "$CORE_CPP" ]; then
       in_refusing && /^  \}/ { print "#endif"; in_refusing = 0 }
     ' "$CORE_CPP" > "${CORE_CPP}.tmp" && mv "${CORE_CPP}.tmp" "$CORE_CPP"
   fi
+# 4. Guard Windows-specific VirtualQuery in Arm64.cpp with #ifdef _WIN32
+ARM64_CPP="$FEX_DIR/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp"
+if [ -f "$ARM64_CPP" ]; then
+  if grep -q "VirtualQuery(reinterpret_cast<LPCVOID>" "$ARM64_CPP" && ! grep -B 2 "MEMORY_BASIC_INFORMATION mbi" "$ARM64_CPP" | grep -q "_WIN32"; then
+    echo "Guarding VirtualQuery in $ARM64_CPP with #ifdef _WIN32"
+    python3 -c "
+import sys
+with open('$ARM64_CPP', 'r') as f:
+    content = f.read()
+target = '''  MEMORY_BASIC_INFORMATION mbi {};
+  const char* type = \"?\";
+  if (VirtualQuery(reinterpret_cast<LPCVOID>(GPRs[AddressReg]), &mbi, sizeof(mbi))) {
+    type = mbi.Type == MEM_IMAGE ? \"MEM_IMAGE\" : mbi.Type == MEM_MAPPED ? \"MEM_MAPPED\" : \"MEM_PRIVATE\";
+  }
+  LogMan::Msg::EFmt(\"[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} \"
+                    \"crosses16B={} | region base={} size={:#x} prot={:#x} type={} state={:#x}\",
+                    Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+                    (GPRs[AddressReg] & 15) ? \"yes\" : \"no\", mbi.BaseAddress, mbi.RegionSize,
+                    mbi.Protect, type, mbi.State);'''
+replacement = '''#ifdef _WIN32
+  MEMORY_BASIC_INFORMATION mbi {};
+  const char* type = \"?\";
+  if (VirtualQuery(reinterpret_cast<LPCVOID>(GPRs[AddressReg]), &mbi, sizeof(mbi))) {
+    type = mbi.Type == MEM_IMAGE ? \"MEM_IMAGE\" : mbi.Type == MEM_MAPPED ? \"MEM_MAPPED\" : \"MEM_PRIVATE\";
+  }
+  LogMan::Msg::EFmt(\"[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} \"
+                    \"crosses16B={} | region base={} size={:#x} prot={:#x} type={} state={:#x}\",
+                    Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+                    (GPRs[AddressReg] & 15) ? \"yes\" : \"no\", mbi.BaseAddress, mbi.RegionSize,
+                    mbi.Protect, type, mbi.State);
+#else
+  LogMan::Msg::EFmt(\"[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} crosses16B={}\",
+                    Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+                    (GPRs[AddressReg] & 15) ? \"yes\" : \"no\");
+#endif'''
+if target in content:
+    content = content.replace(target, replacement)
+    with open('$ARM64_CPP', 'w') as f:
+        f.write(content)
+" 2>/dev/null || true
+  fi
 fi
 
 echo "Successfully patched FEX for atomic_ref and iOS guards"
