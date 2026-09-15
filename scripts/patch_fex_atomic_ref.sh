@@ -258,4 +258,18 @@ inject_include "$FEX_DIR/Source/Tools/LinuxEmulation/LinuxSyscalls/Seccomp/Secco
 inject_include "$FEX_DIR/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp"
 inject_include "$FEX_DIR/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp"
 
-echo "Successfully patched FEX for atomic_ref"
+# 3. Patch Core.cpp to guard iOS-specific instrumentation with #ifdef FEX_IOS_HOST
+CORE_CPP="$FEX_DIR/FEXCore/Source/Interface/Core/Core.cpp"
+if [ -f "$CORE_CPP" ]; then
+  if grep -q "iOS-Madeira ml304" "$CORE_CPP" && ! grep -B 2 "iOS-Madeira ml304" "$CORE_CPP" | grep -q "FEX_IOS_HOST"; then
+    echo "Guarding iOS diagnostic instrumentation in $CORE_CPP with #ifdef FEX_IOS_HOST"
+    awk '
+      /\/\* iOS-Madeira ml304/ { print "#ifdef FEX_IOS_HOST" }
+      { print }
+      /REFUSING low\/invalid RIP/ { in_refusing = 1 }
+      in_refusing && /^  \}/ { print "#endif"; in_refusing = 0 }
+    ' "$CORE_CPP" > "${CORE_CPP}.tmp" && mv "${CORE_CPP}.tmp" "$CORE_CPP"
+  fi
+fi
+
+echo "Successfully patched FEX for atomic_ref and iOS guards"
