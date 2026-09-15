@@ -270,6 +270,8 @@ if [ -f "$CORE_CPP" ]; then
       in_refusing && /^  \}/ { print "#endif"; in_refusing = 0 }
     ' "$CORE_CPP" > "${CORE_CPP}.tmp" && mv "${CORE_CPP}.tmp" "$CORE_CPP"
   fi
+fi
+
 # 4. Guard Windows-specific VirtualQuery in Arm64.cpp with #ifdef _WIN32
 ARM64_CPP="$FEX_DIR/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp"
 if [ -f "$ARM64_CPP" ]; then
