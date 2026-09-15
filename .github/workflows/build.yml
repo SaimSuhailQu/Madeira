@@ -75,9 +75,14 @@ jobs:
 
       - name: Build FEX Core (iOS)
         run: |
+          chmod +x scripts/patch_fex_atomic_ref.sh
+          bash scripts/patch_fex_atomic_ref.sh FEX
+
           mkdir -p FEX/build-ios
           cd FEX/build-ios
           cmake .. -G Ninja \
+            -DCMAKE_CXX_STANDARD=20 \
+            -DCMAKE_CXX_STANDARD_REQUIRED=ON \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_SYSTEM_PROCESSOR=arm64 \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
