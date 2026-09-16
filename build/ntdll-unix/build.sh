@@ -155,6 +155,9 @@ echo ""
 echo "Results: $SUCCEEDED succeeded, $FAILED failed"
 if [ -n "$FAILED_FILES" ]; then
     echo "Failed:$FAILED_FILES"
+    echo ""
+    echo "ERROR: ntdll-unix compilation failed. Check $OBJ_DIR/<name>.err for details."
+    exit 1
 fi
 
 echo ""
