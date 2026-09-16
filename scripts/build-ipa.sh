@@ -15,8 +15,12 @@ command -v brew >/dev/null || die "Homebrew is required: https://brew.sh"
 command -v python3 >/dev/null || die "python3 is required (ships with Xcode command-line tools)."
 
 log "Installing build dependencies"
-brew install cmake ninja meson pkg-config autoconf automake libtool bison flex sevenzip llvm xxd || true
-export PATH="$(brew --prefix bison)/bin:$(brew --prefix llvm)/bin:$PATH"
+brew install cmake ninja meson pkg-config autoconf automake libtool bison flex sevenzip llvm || true
+
+BISON_PATH="$(brew --prefix bison 2>/dev/null || true)/bin"
+LLVM_PATH="$(brew --prefix llvm 2>/dev/null || true)/bin"
+if [[ -d "$BISON_PATH" ]]; then export PATH="$BISON_PATH:$PATH"; fi
+if [[ -d "$LLVM_PATH" ]]; then export PATH="$LLVM_PATH:$PATH"; fi
 
 log "Checking out submodules"
 git -C "$ROOT" submodule update --init --recursive

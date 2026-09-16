@@ -4,6 +4,10 @@ ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 8)}"
 WINE="$ROOT/wine"
 MINGW="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin"
+BISON_PATH="$(brew --prefix bison 2>/dev/null || true)/bin"
+LLVM_PATH="$(brew --prefix llvm 2>/dev/null || true)/bin"
+if [[ -d "$BISON_PATH" ]]; then export PATH="$BISON_PATH:$PATH"; fi
+if [[ -d "$LLVM_PATH" ]]; then export PATH="$LLVM_PATH:$PATH"; fi
 export PATH="$MINGW:$PATH"
 
 [[ -x "$WINE/configure" ]] || { echo "ERROR: wine submodule is missing" >&2; exit 1; }
