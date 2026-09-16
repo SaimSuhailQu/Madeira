@@ -1,0 +1,82 @@
+name: Build Madeira IPA
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build IPA
+    runs-on: macos-14
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+          key: ${{ runner.os }}-brew-${{ hashFiles('scripts/build-ipa.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-brew-
+
+      - name: Cache llvm-mingw toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchains/llvm-mingw-*
+          key: ${{ runner.os }}-llvm-mingw-20260421
+
+      - name: Cache LLVM iOS static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchains/llvm-host-build
+            toolchains/llvm-ios-build
+          key: ${{ runner.os }}-llvm-ios-15.0.7
+
+      - name: Cache FEX build
+        uses: actions/cache@v4
+        with:
+          path: FEX/build-ios
+          key: ${{ runner.os }}-fex-ios-${{ hashFiles('FEX/**') }}
+          restore-keys: |
+            ${{ runner.os }}-fex-ios-
+
+      - name: Cache Wine host build
+        uses: actions/cache@v4
+        with:
+          path: |
+            wine/build-macos
+            wine/build-arm64ec
+          key: ${{ runner.os }}-wine-host-${{ hashFiles('wine/**') }}
+          restore-keys: |
+            ${{ runner.os }}-wine-host-
+
+      - name: Run build-ipa.sh
+        run: |
+          ./scripts/build-ipa.sh
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-ipa
+          path: dist/Madeira.ipa
+          if-no-files-found: error
