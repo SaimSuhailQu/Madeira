@@ -12,6 +12,14 @@ export PATH="$MINGW:$PATH"
 
 [[ -x "$WINE/configure" ]] || { echo "ERROR: wine submodule is missing" >&2; exit 1; }
 
+# Apply patches to Wine submodule if not already applied
+if git -C "$WINE" apply --reverse --check "$ROOT/patches/wine-bitblt-winios-guard.patch" >/dev/null 2>&1; then
+  echo "Wine bitblt patch: already applied"
+else
+  echo "Applying Wine bitblt patch..."
+  git -C "$WINE" apply "$ROOT/patches/wine-bitblt-winios-guard.patch"
+fi
+
 # Native macOS build tree. Madeira's iOS unix-side libraries consume config.h,
 # generated headers, and host build outputs from here. aarch64 is the native
 # PE architecture used by the tracked Wine/DXMT side.

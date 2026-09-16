@@ -1,0 +1,20 @@
+diff --git a/dlls/win32u/dibdrv/bitblt.c b/dlls/win32u/dibdrv/bitblt.c
+index 81bce05..70782f9 100644
+--- a/dlls/win32u/dibdrv/bitblt.c
++++ b/dlls/win32u/dibdrv/bitblt.c
+@@ -1012,6 +1012,7 @@ DWORD dibdrv_PutImage( PHYSDEV dev, HRGN clip, BITMAPINFO *info,
+      * one that already carries the displaced panel. Watching it names the
+      * GUEST code that wrote each region. Only the big paint qualifies; the
+      * watch itself is one-shot and env-gated (MADEIRA_SRCWATCH). */
++#ifdef WINE_IOS
+     if (dst && bits && bits->ptr && dst->visrect.right - dst->visrect.left >= 640
+         && dst->visrect.bottom - dst->visrect.top >= 400)
+     {
+@@ -1070,6 +1071,7 @@ DWORD dibdrv_PutImage( PHYSDEV dev, HRGN clip, BITMAPINFO *info,
+                                               (dst->visrect.bottom - dst->visrect.top)) );
+         }
+     }
++#endif
+ 
+     if (dst && src && dst->visrect.right - dst->visrect.left >= 24)
+     {
