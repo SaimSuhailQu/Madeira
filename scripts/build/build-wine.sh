@@ -20,6 +20,13 @@ else
   git -C "$WINE" apply "$ROOT/patches/wine-bitblt-winios-guard.patch"
 fi
 
+if git -C "$WINE" apply --reverse --check "$ROOT/patches/wine-ntdll-xlate-jit-aarch64.patch" >/dev/null 2>&1; then
+  echo "Wine ntdll xlate_jit patch: already applied"
+else
+  echo "Applying Wine ntdll xlate_jit patch..."
+  git -C "$WINE" apply "$ROOT/patches/wine-ntdll-xlate-jit-aarch64.patch"
+fi
+
 # Native macOS build tree. Madeira's iOS unix-side libraries consume config.h,
 # generated headers, and host build outputs from here. aarch64 is the native
 # PE architecture used by the tracked Wine/DXMT side.
