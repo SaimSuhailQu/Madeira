@@ -62,9 +62,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: FEX/build-ios
-          key: ${{ runner.os }}-fex-ios-cxx20-v7-${{ hashFiles('FEX/**', 'scripts/build/build-fex-ios.sh', 'scripts/patch_fex_atomic_ref.sh') }}
+          key: ${{ runner.os }}-fex-ios-cxx20-v8-${{ hashFiles('FEX/**', 'scripts/build/build-fex-ios.sh', 'scripts/patch_fex_atomic_ref.sh') }}
           restore-keys: |
-            ${{ runner.os }}-fex-ios-cxx20-v7-
+            ${{ runner.os }}-fex-ios-cxx20-v8-
 
       - name: Clean FEX build tree
         run: rm -rf FEX/build-ios

@@ -374,22 +374,44 @@ if target in c:
 " 2>/dev/null || true
 fi
 
-# 6. Patch FEXCore/Source/CMakeLists.txt to link softfloat_3e and FEXCore_Base on APPLE
+# 6. Patch FEXCore/Source/CMakeLists.txt to link softfloat_3e and FEXCore_Base, and skip shared library on APPLE
 FEXCORE_CMAKE="$FEX_DIR/FEXCore/Source/CMakeLists.txt"
 if [ -f "$FEXCORE_CMAKE" ]; then
   python3 -c "
 with open('$FEXCORE_CMAKE', 'r') as f:
     c = f.read()
-target = '''  if (MINGW)
+
+target1 = '''  if (MINGW)
     target_link_libraries(\${Name} PRIVATE FEXCore_Base)
   endif()'''
-replacement = '''  if (MINGW OR APPLE)
+replacement1 = '''  if (MINGW OR APPLE)
     target_link_libraries(\${Name} PRIVATE FEXCore_Base softfloat_3e)
   endif()'''
-if target in c:
-    c = c.replace(target, replacement)
-    with open('$FEXCORE_CMAKE', 'w') as f:
-        f.write(c)
+if target1 in c:
+    c = c.replace(target1, replacement1)
+
+target2 = '''AddObject(\${PROJECT_NAME}_object)
+AddLibrary(\${PROJECT_NAME} STATIC)
+AddLibrary(\${PROJECT_NAME}_shared SHARED)'''
+replacement2 = '''AddObject(\${PROJECT_NAME}_object)
+AddLibrary(\${PROJECT_NAME} STATIC)
+if (NOT APPLE)
+  AddLibrary(\${PROJECT_NAME}_shared SHARED)
+endif()'''
+if target2 in c:
+    c = c.replace(target2, replacement2)
+
+target3 = '''# The shared library should always link enabled jemalloc libraries
+target_link_libraries(\${PROJECT_NAME}_shared PRIVATE JemallocLibs)'''
+replacement3 = '''# The shared library should always link enabled jemalloc libraries
+if (TARGET \${PROJECT_NAME}_shared)
+  target_link_libraries(\${PROJECT_NAME}_shared PRIVATE JemallocLibs)
+endif()'''
+if target3 in c:
+    c = c.replace(target3, replacement3)
+
+with open('$FEXCORE_CMAKE', 'w') as f:
+    f.write(c)
 " 2>/dev/null || true
 fi
 

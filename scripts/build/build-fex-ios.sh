@@ -41,5 +41,5 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DTUNE_CPU=generic \
   -DTUNE_ARCH=generic
 
-cmake --build "$BUILD" --parallel "$JOBS"
+cmake --build "$BUILD" --target FEXCore FEXCore_Base --parallel "$JOBS"
 [[ -f "$OUT" ]] || { echo "ERROR: FEX build did not produce $OUT" >&2; exit 1; }
