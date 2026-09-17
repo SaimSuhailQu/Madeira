@@ -11,18 +11,26 @@ if [[ -f "$OUT" ]]; then
   exit 0
 fi
 
+# Apply FEX atomic_ref fallback & host guards
+if [[ -f "$ROOT/scripts/patch_fex_atomic_ref.sh" ]]; then
+  bash "$ROOT/scripts/patch_fex_atomic_ref.sh" "$SRC"
+fi
+
 # -DFEX_IOS_HOST=1 selects the iOS host-feature stubs inside this FEX fork
 # (HostFeatures, InvalidationTracker, logging). A build without it compiles
 # but misdetects the host at runtime, so it is required here, not optional.
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
+  -DCMAKE_CXX_STANDARD=20 \
+  -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+  -DCMAKE_CXX_EXTENSIONS=OFF \
   -DCMAKE_SYSTEM_NAME=iOS \
   -DCMAKE_SYSTEM_PROCESSOR=arm64 \
   -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_FLAGS=-DFEX_IOS_HOST=1 \
-  -DCMAKE_CXX_FLAGS=-DFEX_IOS_HOST=1 \
+  -DCMAKE_C_FLAGS="-DFEX_IOS_HOST=1" \
+  -DCMAKE_CXX_FLAGS="-DFEX_IOS_HOST=1 -std=c++20" \
   -DBUILD_TESTING=OFF \
   -DBUILD_FEX_LINUX_TESTS=OFF \
   -DBUILD_THUNKS=OFF \
