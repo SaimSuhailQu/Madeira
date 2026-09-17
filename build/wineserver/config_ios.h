@@ -10,4 +10,7 @@
 // and servers/bootstrap.h (missing on iOS)
 #ifdef __APPLE__
 #define WINE_IOS 1
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #endif

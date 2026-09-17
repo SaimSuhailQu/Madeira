@@ -109,6 +109,8 @@ void ios_wineserver_wake(void)
 #include <sys/sysmacros.h>
 #endif
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <unistd.h>
 #ifdef HAVE_SYS_SYSCALL_H
 #include <sys/syscall.h>

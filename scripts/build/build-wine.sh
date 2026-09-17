@@ -27,6 +27,26 @@ else
   git -C "$WINE" apply "$ROOT/patches/wine-ntdll-xlate-jit-aarch64.patch"
 fi
 
+# Ensure wine/server/fd.c includes socket headers on Apple
+WINE_FD="$WINE/server/fd.c"
+if [[ -f "$WINE_FD" ]] && ! grep -q "sys/socket.h" "$WINE_FD"; then
+  echo "Patching $WINE_FD for socket headers..."
+  python3 -c "
+with open('$WINE_FD', 'r') as f:
+    c = f.read()
+target = '#include <sys/types.h>'
+replacement = '''#include <sys/types.h>
+#ifdef __APPLE__
+#include <sys/socket.h>
+#include <netinet/in.h>
+#endif'''
+if target in c:
+    c = c.replace(target, replacement, 1)
+    with open('$WINE_FD', 'w') as f:
+        f.write(c)
+" 2>/dev/null || true
+fi
+
 # Native macOS build tree. Madeira's iOS unix-side libraries consume config.h,
 # generated headers, and host build outputs from here. aarch64 is the native
 # PE architecture used by the tracked Wine/DXMT side.
