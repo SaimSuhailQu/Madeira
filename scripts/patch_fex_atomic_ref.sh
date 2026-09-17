@@ -427,6 +427,28 @@ __attribute__((weak)) int rpm_cas_snapshot_take(struct rpm_cas_snapshot* out) {
 if target3 in c and '__attribute__((weak)) int rpm_cas_snapshot_take' not in c:
     c = c.replace(target3, replacement3)
 
+target4 = '''extern \"C\" int ios_fex_mono_bridge_armed();'''
+replacement4 = '''extern \"C\" int ios_fex_mono_bridge_armed();
+
+#if !defined(_WIN32)
+__attribute__((weak)) uint64_t IosMonoResolveRW(uint64_t GuestAddr, uint64_t Size) {
+  (void)GuestAddr; (void)Size;
+  return 0;
+}
+__attribute__((weak)) void ios_fex_mono_count_helper(int Miss) {
+  (void)Miss;
+}
+__attribute__((weak)) int ios_fex_mono_take_pending(uint64_t* BlockBegin, uint64_t* HostPC, uint64_t* FaultAddr) {
+  (void)BlockBegin; (void)HostPC; (void)FaultAddr;
+  return 0;
+}
+__attribute__((weak)) void ios_fex_mono_count_activated() {}
+__attribute__((weak)) uint64_t ios_fex_mono_captured_count() { return 0; }
+__attribute__((weak)) int ios_fex_mono_bridge_armed() { return 0; }
+#endif'''
+if target4 in c and '__attribute__((weak)) int ios_fex_mono_take_pending' not in c:
+    c = c.replace(target4, replacement4)
+
 with open('$CORE_CPP', 'w') as f:
     f.write(c)
 " 2>/dev/null || true
