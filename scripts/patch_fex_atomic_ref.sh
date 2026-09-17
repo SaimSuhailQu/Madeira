@@ -416,6 +416,17 @@ __attribute__((weak)) uint64_t IosFfsBypassLog[4] {};
 if target2 in c and '__attribute__((weak)) uint64_t IosFfsBypassLog' not in c:
     c = c.replace(target2, replacement2)
 
+target3 = '''int rpm_cas_snapshot_take(struct rpm_cas_snapshot* out);'''
+replacement3 = '''int rpm_cas_snapshot_take(struct rpm_cas_snapshot* out);
+#if !defined(_WIN32)
+__attribute__((weak)) int rpm_cas_snapshot_take(struct rpm_cas_snapshot* out) {
+  (void)out;
+  return 0;
+}
+#endif'''
+if target3 in c and '__attribute__((weak)) int rpm_cas_snapshot_take' not in c:
+    c = c.replace(target3, replacement3)
+
 with open('$CORE_CPP', 'w') as f:
     f.write(c)
 " 2>/dev/null || true

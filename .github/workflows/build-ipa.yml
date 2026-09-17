@@ -62,11 +62,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: FEX/build-ios
-          key: ${{ runner.os }}-fex-ios-cxx20-v4-${{ hashFiles('FEX/**', 'scripts/build/build-fex-ios.sh', 'scripts/patch_fex_atomic_ref.sh') }}
+          key: ${{ runner.os }}-fex-ios-cxx20-v5-${{ hashFiles('FEX/**', 'scripts/build/build-fex-ios.sh', 'scripts/patch_fex_atomic_ref.sh') }}
           restore-keys: |
+            ${{ runner.os }}-fex-ios-cxx20-v5-
             ${{ runner.os }}-fex-ios-cxx20-v4-
             ${{ runner.os }}-fex-ios-cxx20-v3-
-            ${{ runner.os }}-fex-ios-cxx20-v2-
             ${{ runner.os }}-fex-ios-
 
       - name: Cache Wine host build
