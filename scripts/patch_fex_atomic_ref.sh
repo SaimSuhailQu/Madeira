@@ -374,4 +374,51 @@ if target in c:
 " 2>/dev/null || true
 fi
 
+# 6. Patch FEXCore/Source/CMakeLists.txt to link softfloat_3e and FEXCore_Base on APPLE
+FEXCORE_CMAKE="$FEX_DIR/FEXCore/Source/CMakeLists.txt"
+if [ -f "$FEXCORE_CMAKE" ]; then
+  python3 -c "
+with open('$FEXCORE_CMAKE', 'r') as f:
+    c = f.read()
+target = '''  if (MINGW)
+    target_link_libraries(\${Name} PRIVATE FEXCore_Base)
+  endif()'''
+replacement = '''  if (MINGW OR APPLE)
+    target_link_libraries(\${Name} PRIVATE FEXCore_Base softfloat_3e)
+  endif()'''
+if target in c:
+    c = c.replace(target, replacement)
+    with open('$FEXCORE_CMAKE', 'w') as f:
+        f.write(c)
+" 2>/dev/null || true
+fi
+
+# 7. Patch Core.cpp to provide fallback definitions for iOS symbols in non-Windows builds
+CORE_CPP="$FEX_DIR/FEXCore/Source/Interface/Core/Core.cpp"
+if [ -f "$CORE_CPP" ]; then
+  python3 -c "
+with open('$CORE_CPP', 'r') as f:
+    c = f.read()
+
+target1 = '''extern \"C\" uint64_t IosJitReverseTranslate(uint64_t Addr);'''
+replacement1 = '''extern \"C\" uint64_t IosJitReverseTranslate(uint64_t Addr);
+#if !defined(_WIN32)
+__attribute__((weak)) uint64_t IosJitReverseTranslate(uint64_t Addr) { return Addr; }
+#endif'''
+if target1 in c and '__attribute__((weak)) uint64_t IosJitReverseTranslate' not in c:
+    c = c.replace(target1, replacement1)
+
+target2 = '''extern \"C\" uint64_t IosFfsBypassLog[4];'''
+replacement2 = '''extern \"C\" uint64_t IosFfsBypassLog[4];
+#if !defined(_WIN32)
+__attribute__((weak)) uint64_t IosFfsBypassLog[4] {};
+#endif'''
+if target2 in c and '__attribute__((weak)) uint64_t IosFfsBypassLog' not in c:
+    c = c.replace(target2, replacement2)
+
+with open('$CORE_CPP', 'w') as f:
+    f.write(c)
+" 2>/dev/null || true
+fi
+
 echo "Successfully patched FEX for atomic_ref and iOS guards"
