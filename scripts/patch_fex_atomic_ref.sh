@@ -318,22 +318,60 @@ fi
 # 5. Patch LinkerGC.cmake and vixl CMakeLists.txt to use Apple-compatible linker flags (-dead_strip, -x)
 LINKER_GC_CMAKE="$FEX_DIR/Data/CMake/LinkerGC.cmake"
 if [ -f "$LINKER_GC_CMAKE" ]; then
-  if ! grep -q "if (APPLE)" "$LINKER_GC_CMAKE"; then
-    echo "Patching $LINKER_GC_CMAKE for Apple ld"
-    sed -i.bak 's/"LINKER:--gc-sections"/if (APPLE)\n      target_link_options(${target} PRIVATE\n        "LINKER:-dead_strip"\n        "LINKER:-x")\n    else()\n      target_link_options(${target} PRIVATE\n        "LINKER:--gc-sections"/' "$LINKER_GC_CMAKE" || true
-    sed -i.bak 's/"LINKER:--as-needed")/"LINKER:--as-needed")\n    endif()/' "$LINKER_GC_CMAKE" || true
-    rm -f "${LINKER_GC_CMAKE}.bak"
-  fi
+  cat << 'EOF' > "$LINKER_GC_CMAKE"
+# SPDX-License-Identifier: MIT
+
+macro(LinkerGC target)
+  if (CMAKE_BUILD_TYPE MATCHES "RELEASE")
+    if (APPLE)
+      target_link_options(${target} PRIVATE
+        "LINKER:-dead_strip"
+        "LINKER:-x")
+    else()
+      target_link_options(${target} PRIVATE
+        "LINKER:--gc-sections"
+        "LINKER:--strip-all"
+        "LINKER:--as-needed")
+    endif()
+  endif()
+endmacro()
+EOF
 fi
 
 VIXL_CMAKE="$FEX_DIR/External/vixl/src/CMakeLists.txt"
 if [ -f "$VIXL_CMAKE" ]; then
-  if ! grep -q "if (APPLE)" "$VIXL_CMAKE"; then
-    echo "Patching $VIXL_CMAKE for Apple ld"
-    sed -i.bak 's/"LINKER:--gc-sections"/if (APPLE)\n    target_link_options(vixl PRIVATE\n      "LINKER:-dead_strip"\n      "LINKER:-x")\n  else\n    target_link_options(vixl PRIVATE\n      "LINKER:--gc-sections"/' "$VIXL_CMAKE" || true
-    sed -i.bak 's/"LINKER:--as-needed"/"LINKER:--as-needed"\n  endif/' "$VIXL_CMAKE" || true
-    rm -f "${VIXL_CMAKE}.bak"
-  fi
+  python3 -c "
+with open('$VIXL_CMAKE', 'r') as f:
+    c = f.read()
+target = '''if (CMAKE_BUILD_TYPE MATCHES \"RELEASE\")
+  target_link_options(vixl
+    PRIVATE
+    \"LINKER:--gc-sections\"
+    \"LINKER:--strip-all\"
+    \"LINKER:--as-needed\"
+  )
+endif()'''
+replacement = '''if (CMAKE_BUILD_TYPE MATCHES \"RELEASE\")
+  if (APPLE)
+    target_link_options(vixl
+      PRIVATE
+      \"LINKER:-dead_strip\"
+      \"LINKER:-x\"
+    )
+  else()
+    target_link_options(vixl
+      PRIVATE
+      \"LINKER:--gc-sections\"
+      \"LINKER:--strip-all\"
+      \"LINKER:--as-needed\"
+    )
+  endif()
+endif()'''
+if target in c:
+    c = c.replace(target, replacement)
+    with open('$VIXL_CMAKE', 'w') as f:
+        f.write(c)
+" 2>/dev/null || true
 fi
 
 echo "Successfully patched FEX for atomic_ref and iOS guards"
