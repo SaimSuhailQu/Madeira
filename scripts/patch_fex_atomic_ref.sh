@@ -315,4 +315,25 @@ if target in content:
   fi
 fi
 
+# 5. Patch LinkerGC.cmake and vixl CMakeLists.txt to use Apple-compatible linker flags (-dead_strip, -x)
+LINKER_GC_CMAKE="$FEX_DIR/Data/CMake/LinkerGC.cmake"
+if [ -f "$LINKER_GC_CMAKE" ]; then
+  if ! grep -q "if (APPLE)" "$LINKER_GC_CMAKE"; then
+    echo "Patching $LINKER_GC_CMAKE for Apple ld"
+    sed -i.bak 's/"LINKER:--gc-sections"/if (APPLE)\n      target_link_options(${target} PRIVATE\n        "LINKER:-dead_strip"\n        "LINKER:-x")\n    else()\n      target_link_options(${target} PRIVATE\n        "LINKER:--gc-sections"/' "$LINKER_GC_CMAKE" || true
+    sed -i.bak 's/"LINKER:--as-needed")/"LINKER:--as-needed")\n    endif()/' "$LINKER_GC_CMAKE" || true
+    rm -f "${LINKER_GC_CMAKE}.bak"
+  fi
+fi
+
+VIXL_CMAKE="$FEX_DIR/External/vixl/src/CMakeLists.txt"
+if [ -f "$VIXL_CMAKE" ]; then
+  if ! grep -q "if (APPLE)" "$VIXL_CMAKE"; then
+    echo "Patching $VIXL_CMAKE for Apple ld"
+    sed -i.bak 's/"LINKER:--gc-sections"/if (APPLE)\n    target_link_options(vixl PRIVATE\n      "LINKER:-dead_strip"\n      "LINKER:-x")\n  else\n    target_link_options(vixl PRIVATE\n      "LINKER:--gc-sections"/' "$VIXL_CMAKE" || true
+    sed -i.bak 's/"LINKER:--as-needed"/"LINKER:--as-needed"\n  endif/' "$VIXL_CMAKE" || true
+    rm -f "${VIXL_CMAKE}.bak"
+  fi
+fi
+
 echo "Successfully patched FEX for atomic_ref and iOS guards"
