@@ -79,6 +79,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-wine-host-
 
+      - name: Fix script permissions
+        run: |
+          find scripts build -type f -name '*.sh' -exec chmod +x {} +
+
       - name: Run build-ipa.sh
         run: |
           ./scripts/build-ipa.sh

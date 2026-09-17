@@ -13,5 +13,10 @@ if [[ ! -d "$SRC/.git" ]]; then
   rm -rf "$SRC"
   git clone --depth 1 --branch VER-2-13-3 https://github.com/freetype/freetype.git "$SRC"
 fi
-
-"$ROOT/build/freetype-ios/build.sh"
+FREETYPE_BUILD="$ROOT/build/freetype-ios/build.sh"
+if [[ ! -f "$FREETYPE_BUILD" ]]; then
+  echo "ERROR: Missing FreeType build script: $FREETYPE_BUILD" >&2
+  exit 1
+fi
+chmod +x "$FREETYPE_BUILD" || true
+bash "$FREETYPE_BUILD"
