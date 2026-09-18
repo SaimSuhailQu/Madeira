@@ -1,0 +1,45 @@
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index a3be2bc..21fba89 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -122,7 +122,18 @@ _MTLCopyAllDevices(void *obj) {
+     params->ret = (wmtr_call(RM_OP_COPY_ALL_DEVICES, 0, 0, &r, sizeof r, 0) == RM_OK) ? r.handle : 0;
+     return STATUS_SUCCESS;
+   }
++#if TARGET_OS_OSX || TARGET_OS_MACCATALYST
+   params->ret = (obj_handle_t)MTLCopyAllDevices();
++#else
++  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
++  if (device) {
++    NSArray *devices = [[NSArray alloc] initWithObjects:device, nil];
++    params->ret = (obj_handle_t)devices;
++    [device release];
++  } else {
++    params->ret = 0;
++  }
++#endif
+   return STATUS_SUCCESS;
+ }
+ 
+diff --git a/src/winemetal/unix/wmt_remote_pack.h b/src/winemetal/unix/wmt_remote_pack.h
+index b7bc002..b1d7d08 100644
+--- a/src/winemetal/unix/wmt_remote_pack.h
++++ b/src/winemetal/unix/wmt_remote_pack.h
+@@ -102,7 +102,7 @@ wmtw_pack_render(const struct wmtcmd_base *head, struct wmtw_packer *p,
+         }
+         case WMTRenderCommandSetViewports: {
+             const struct wmtcmd_render_setviewports *b = (const void *)c;
+-            if (b->viewport_count > WMTW_MAX_ARRAY_COUNT) FAIL(WMTW_PACK_BAD_ARRAY_COUNT);
++            if ((uint32_t)b->viewport_count > WMTW_MAX_ARRAY_COUNT) FAIL(WMTW_PACK_BAD_ARRAY_COUNT);
+             ALLOC(setviewports, WMTW_OP_SetViewports);
+             uint32_t bytes = (uint32_t)b->viewport_count * (uint32_t)sizeof(struct wmtw_viewport);
+             w->viewports_offset = wmtw_side_put(p, b->viewports.ptr, bytes);
+@@ -112,7 +112,7 @@ wmtw_pack_render(const struct wmtcmd_base *head, struct wmtw_packer *p,
+         }
+         case WMTRenderCommandSetScissorRects: {
+             const struct wmtcmd_render_setscissorrects *b = (const void *)c;
+-            if (b->rect_count > WMTW_MAX_ARRAY_COUNT) FAIL(WMTW_PACK_BAD_ARRAY_COUNT);
++            if ((uint32_t)b->rect_count > WMTW_MAX_ARRAY_COUNT) FAIL(WMTW_PACK_BAD_ARRAY_COUNT);
+             ALLOC(setscissorrects, WMTW_OP_SetScissorRects);
+             uint32_t bytes = (uint32_t)b->rect_count * (uint32_t)sizeof(struct wmtw_scissor);
+             w->scissors_offset = wmtw_side_put(p, b->scissor_rects.ptr, bytes);

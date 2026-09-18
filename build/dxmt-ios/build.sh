@@ -15,6 +15,17 @@ SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 OBJ_DIR="$BUILD_DIR/obj"
 OUT_LIB="$BUILD_DIR/libdxmt_unix.a"
 
+# Apply patches to DXMT submodule if not already applied
+PATCH="$REPO_ROOT/patches/dxmt-ios-mtlcopyalldevices.patch"
+if [[ -f "$PATCH" ]]; then
+  if git -C "$DXMT_ROOT" apply --reverse --check "$PATCH" >/dev/null 2>&1; then
+    echo "DXMT iOS patch: already applied"
+  else
+    echo "Applying DXMT iOS patch..."
+    git -C "$DXMT_ROOT" apply "$PATCH"
+  fi
+fi
+
 mkdir -p "$OBJ_DIR"
 
 COMMON_FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=18.0 -fblocks -O2"
