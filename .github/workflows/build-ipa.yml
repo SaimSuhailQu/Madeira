@@ -82,9 +82,11 @@ jobs:
         run: |
           rm -rf wine/build-macos wine/build-arm64ec build/wineserver/obj
 
-      - name: Clean DXMT iOS build tree
+      - name: Clean DXMT iOS build tree and VC runtime cache
         run: |
           rm -rf build/dxmt-ios/obj app/Madeira/libdxmt_combined.a
+          rm -f toolchains/downloads/vc_redist*
+          rm -rf toolchains/downloads/vc_redist* app/Madeira/x86_64-vcruntime
 
       - name: Configure Apple compiler environment
         run: |
