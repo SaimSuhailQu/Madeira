@@ -85,7 +85,13 @@ echo ""
 echo "Results: $SUCCEEDED succeeded, $FAILED failed"
 if [ -n "$FAILED_FILES" ]; then
     echo "Failed:$FAILED_FILES"
-    echo "See .err files in $OBJ_DIR/"
+    echo "Dumping .err files from $OBJ_DIR/:"
+    for f in $FAILED_FILES; do
+        if [ -f "$OBJ_DIR/$f.err" ]; then
+            echo "===== $OBJ_DIR/$f.err ====="
+            cat "$OBJ_DIR/$f.err"
+        fi
+    done
     exit 1
 fi
 

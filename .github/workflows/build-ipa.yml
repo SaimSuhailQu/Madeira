@@ -33,7 +33,6 @@ jobs:
         run: |
           brew install cmake ninja meson pkg-config autoconf automake libtool bison flex sevenzip llvm
           echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
-          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
       - name: Cache Homebrew packages
         uses: actions/cache@v4
@@ -83,6 +82,30 @@ jobs:
         run: |
           rm -rf wine/build-macos wine/build-arm64ec build/wineserver/obj
 
+      - name: Clean DXMT iOS build tree
+        run: |
+          rm -rf build/dxmt-ios/obj app/Madeira/libdxmt_combined.a
+
+      - name: Configure Apple compiler environment
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+          echo "DEVELOPER_DIR=/Applications/Xcode_15.4.app/Contents/Developer" >> "$GITHUB_ENV"
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export CC="$(xcrun --find clang)"
+          export CXX="$(xcrun --find clang++)"
+          export OBJC="$(xcrun --find clang)"
+          export OBJCXX="$(xcrun --find clang++)"
+          {
+            echo "CC=$CC"
+            echo "CXX=$CXX"
+            echo "OBJC=$OBJC"
+            echo "OBJCXX=$OBJCXX"
+          } >> "$GITHUB_ENV"
+          "$CC" --version
+          xcrun --sdk macosx --show-sdk-path
+
       - name: Fix script permissions
         run: |
           find scripts build -type f -name '*.sh' -exec chmod +x {} +
@@ -90,6 +113,14 @@ jobs:
       - name: Run build-ipa.sh
         run: |
           ./scripts/build-ipa.sh
+
+      - name: Print failed DXMT compiler logs
+        if: failure()
+        run: |
+          find build/dxmt-ios/obj -type f -name '*.err' -print -exec sh -c '
+            echo "===== $1 ====="
+            cat "$1"
+          ' sh {} \;
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
