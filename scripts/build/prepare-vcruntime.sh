@@ -83,56 +83,107 @@ while true; do
   (( nested_found == 0 )) && break
 done
 
-# The Microsoft x64 package can also contain ARM64 payloads. Extract all
-# CABs, then select only PE32+ AMD64 (Machine 0x8664) DLLs by reading each PE
-# header. This keeps the build correct even if Microsoft changes CAB ordering.
-CABS=()
-while IFS= read -r cab; do CABS+=("$cab"); done < <(find "$EXTRACT_DIR" -type f -iname '*.cab' | sort)
-if (( ${#CABS[@]} == 0 )); then
-  echo "VC redist contents ($EXE):"
-  "$SEVENZIP" l "$EXE" || true
-  echo "ERROR: could not locate CAB payloads inside $EXE" >&2
-  exit 1
-fi
-
-mkdir -p "$TMP/cabs"
-for i in "${!CABS[@]}"; do
-  mkdir -p "$TMP/cabs/$i"
-  "$SEVENZIP" x -y "${CABS[$i]}" -o"$TMP/cabs/$i" >/dev/null || true
-done
-
-is_amd64_pe() {
-  python3 - "$1" <<'PYPE'
-from pathlib import Path
-import struct
-import sys
-
-p = Path(sys.argv[1])
-try:
-    data = p.read_bytes()
-    if data[:2] != b"MZ" or len(data) < 0x40:
-        raise ValueError
-    pe = struct.unpack_from("<I", data, 0x3C)[0]
-    if data[pe:pe + 4] != b"PE\0\0":
-        raise ValueError
-    machine = struct.unpack_from("<H", data, pe + 4)[0]
-except (OSError, ValueError, struct.error):
-    sys.exit(2)
-
-sys.exit(0 if machine == 0x8664 else 1)
-PYPE
+# 1. First, check if 7-Zip directly extracted any of the required DLLs or dll_amd64 files
+copy_matching_dlls() {
+  local search_dir="$1"
+  local found=0
+  for dll in "${DLLS[@]}"; do
+    if [[ ! -f "$DEST/$dll" ]]; then
+      local candidate=""
+      # Check exact dll, dll_amd64, or case-insensitive matches
+      candidate="$(find "$search_dir" -type f \( -iname "$dll" -o -iname "${dll}_amd64" \) 2>/dev/null | head -n 1 || true)"
+      if [[ -n "$candidate" ]]; then
+        cp "$candidate" "$DEST/$dll"
+        echo "  Extracted $dll from $candidate"
+      fi
+    fi
+  done
 }
 
+copy_matching_dlls "$EXTRACT_DIR"
+
+# 2. Check if all DLLs are already satisfied from direct extraction
+all_found=1
+for dll in "${DLLS[@]}"; do [[ -f "$DEST/$dll" ]] || all_found=0; done
+
+if (( ! all_found )); then
+  # Extract any CAB files found in the extraction tree
+  CABS=()
+  while IFS= read -r cab; do CABS+=("$cab"); done < <(find "$EXTRACT_DIR" -type f -iname '*.cab' 2>/dev/null | sort)
+
+  # If no .cab files exist by extension, carve embedded MSCF CAB streams out of the EXE
+  if (( ${#CABS[@]} == 0 )); then
+    echo "Carving embedded CAB streams from $EXE..."
+    python3 - "$EXE" "$TMP" <<'PYCARVE'
+import sys, os, struct
+
+exe_path = sys.argv[1]
+out_dir = sys.argv[2]
+with open(exe_path, "rb") as f:
+    data = f.read()
+
+idx = 0
+cab_idx = 0
+while True:
+    pos = data.find(b"MSCF", idx)
+    if pos == -1:
+        break
+    if pos + 32 <= len(data):
+        try:
+            sig, _, cbCab = struct.unpack_from("<4sII", data, pos)
+            if sig == b"MSCF" and 32 < cbCab <= len(data) - pos:
+                cab_file = os.path.join(out_dir, f"embedded_{cab_idx}.cab")
+                with open(cab_file, "wb") as out:
+                    out.write(data[pos : pos + cbCab])
+                print(f"  Carved {cab_file} ({cbCab} bytes at offset {pos})")
+                cab_idx += 1
+        except Exception:
+            pass
+    idx = pos + 4
+PYCARVE
+    while IFS= read -r cab; do CABS+=("$cab"); done < <(find "$TMP" -maxdepth 1 -type f -iname '*.cab' 2>/dev/null | sort)
+  fi
+
+  # Recursively extract each discovered or carved CAB
+  mkdir -p "$TMP/cabs"
+  for i in "${!CABS[@]}"; do
+    cab_dest="$TMP/cabs/$i"
+    mkdir -p "$cab_dest"
+    "$SEVENZIP" x -y "${CABS[$i]}" -o"$cab_dest" >/dev/null 2>&1 || true
+    # If the CAB contained inner CABs (e.g. a0..a13 without extension), extract those too
+    while IFS= read -r inner_cab; do
+      is_cab=0
+      if [[ "$inner_cab" == *.cab ]]; then
+        is_cab=1
+      elif [[ $(head -c 4 "$inner_cab" 2>/dev/null) == "MSCF" ]]; then
+        is_cab=1
+      fi
+      if (( is_cab )); then
+        inner_dest="${inner_cab}_extracted"
+        mkdir -p "$inner_dest"
+        "$SEVENZIP" x -y "$inner_cab" -o"$inner_dest" >/dev/null 2>&1 || true
+      fi
+    done < <(find "$cab_dest" -type f 2>/dev/null || true)
+  done
+
+  # Search the extracted CAB contents
+  copy_matching_dlls "$TMP/cabs"
+fi
+
+# Verify that every required DLL is present
+missing=()
 for dll in "${DLLS[@]}"; do
-  src=""
-  while IFS= read -r candidate; do
-    if is_amd64_pe "$candidate"; then
-      src="$candidate"
-      break
-    fi
-  done < <(find "$TMP/cabs" -type f -iname "$dll" | sort)
-  [[ -n "$src" ]] || { echo "ERROR: x86_64 $dll not found in Microsoft redistributable" >&2; exit 1; }
-  cp "$src" "$DEST/$dll"
+  if [[ ! -f "$DEST/$dll" ]]; then
+    missing+=("$dll")
+  fi
 done
+
+if (( ${#missing[@]} > 0 )); then
+  echo "ERROR: The following required x86_64 Visual C++ runtime DLLs were not found: ${missing[*]}" >&2
+  echo "VC redist contents ($EXE):"
+  "$SEVENZIP" l "$EXE" || true
+  find "$TMP" -type f -print || true
+  exit 1
+fi
 
 echo "Visual C++ runtime: extracted to $DEST"
