@@ -17,23 +17,27 @@ if [[ ! -d "$SRC/.git" ]]; then
   git clone --depth 1 --branch "$TAG" https://github.com/llvm/llvm-project.git "$SRC"
 fi
 
-# Apple ld does not accept --gc-sections. DXMT's documented iOS build requires
-# AddLLVM.cmake to treat iOS like Darwin and use -dead_strip.
+# Apple ld does not accept --gc-sections. Replace all occurrences of Darwin
+# checks to include iOS, ensure --gc-sections is never used on Apple platforms,
+# and disable dead stripping for the host toolchain (llvm-tblgen).
 python3 - "$SRC/llvm/cmake/modules/AddLLVM.cmake" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 s = p.read_text()
-if 'MATCHES "Darwin|iOS"' not in s:
-    old = 'MATCHES "Darwin"'
-    if old not in s:
-        raise SystemExit(f"expected pattern not found in {p}")
-    p.write_text(s.replace(old, 'MATCHES "Darwin|iOS"', 1))
+# Ensure both export symbol lists and dead stripping treat iOS like Darwin
+s = s.replace('MATCHES "Darwin"', 'MATCHES "Darwin|iOS"')
+# Ensure --gc-sections is never added when building on/for Apple platforms
+s = s.replace('LINK_FLAGS " -Wl,--gc-sections"', 'LINK_FLAGS ""')
+p.write_text(s)
 PY
 
 if [[ ! -x "$HOST/bin/llvm-tblgen" ]]; then
   cmake -S "$SRC/llvm" -B "$HOST" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER="$(xcrun -find clang)" \
+    -DCMAKE_CXX_COMPILER="$(xcrun -find clang++)" \
+    -DLLVM_NO_DEAD_STRIP=ON \
     -DLLVM_INCLUDE_TESTS=OFF \
     -DLLVM_INCLUDE_EXAMPLES=OFF \
     -DLLVM_INCLUDE_BENCHMARKS=OFF \

@@ -56,7 +56,7 @@ jobs:
           path: |
             toolchains/llvm-host-build
             toolchains/llvm-ios-build
-          key: ${{ runner.os }}-llvm-ios-15.0.7
+          key: ${{ runner.os }}-llvm-ios-15.0.7-v2
 
       - name: Cache FEX build
         uses: actions/cache@v4
