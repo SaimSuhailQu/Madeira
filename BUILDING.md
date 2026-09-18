@@ -37,8 +37,8 @@ The IPA is ad-hoc signed with Madeira's requested entitlements so that a
 sideloading tool such as SideStore can re-sign it with the contributor's own
 development identity.
 
-The current native DXMT build targets iOS 18.0, so the packaged application
-also uses iOS 18.0 as its effective deployment target.
+The current native DXMT build targets iOS 17.0, so the packaged application
+also uses iOS 17.0 as its effective deployment target.
 
 ## Re-running the build
 

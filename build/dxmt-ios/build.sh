@@ -28,7 +28,7 @@ fi
 
 mkdir -p "$OBJ_DIR"
 
-COMMON_FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=18.0 -fblocks -O2"
+COMMON_FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=17.0 -fblocks -O2"
 INCLUDES="-I$DXMT_ROOT/include -I$DXMT_ROOT/libs -I$DXMT_SRC/winemetal -I$DXMT_SRC/airconv"
 INCLUDES_DIRECTX="-I$DXMT_ROOT/include/native/directx -I$DXMT_ROOT/include/native/windows"
 INCLUDES_SHADERS="-I$BUILD_DIR/shader-headers"
