@@ -43,3 +43,13 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
 
 cmake --build "$BUILD" --target FEXCore FEXCore_Base --parallel "$JOBS"
 [[ -f "$OUT" ]] || { echo "ERROR: FEX build did not produce $OUT" >&2; exit 1; }
+
+BASE_OUT="$BUILD/FEXCore/Source/libFEXCore_Base.a"
+[[ -f "$BASE_OUT" ]] || { echo "ERROR: FEX build did not produce $BASE_OUT" >&2; exit 1; }
+echo "=== Verifying libFEXCore_Base.a symbols ==="
+if command -v nm >/dev/null; then
+  nm -gU "$BASE_OUT" 2>/dev/null | grep 'Allocator.*memalign' || {
+    echo "ERROR: FEXCore::Allocator::memalign definition missing from $BASE_OUT" >&2
+    exit 1
+  }
+fi

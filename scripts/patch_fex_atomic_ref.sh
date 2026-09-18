@@ -374,12 +374,22 @@ if target in c:
 " 2>/dev/null || true
 fi
 
-# 6. Patch FEXCore/Source/CMakeLists.txt to link softfloat_3e and FEXCore_Base, and skip shared library on APPLE
+# 6. Patch FEXCore/Source/CMakeLists.txt to link softfloat_3e and FEXCore_Base, include AllocatorHooks in FEXCore_Base on Apple, and skip shared library on APPLE
 FEXCORE_CMAKE="$FEX_DIR/FEXCore/Source/CMakeLists.txt"
 if [ -f "$FEXCORE_CMAKE" ]; then
   python3 -c "
 with open('$FEXCORE_CMAKE', 'r') as f:
     c = f.read()
+
+target0 = '''set(FEXCORE_BASE_SRCS
+  Interface/Config/Config.cpp
+  Utils/Allocator.cpp'''
+replacement0 = '''set(FEXCORE_BASE_SRCS
+  Interface/Config/Config.cpp
+  Utils/Allocator.cpp
+  Utils/AllocatorHooks.cpp'''
+if target0 in c:
+    c = c.replace(target0, replacement0)
 
 target1 = '''  if (MINGW)
     target_link_libraries(\${Name} PRIVATE FEXCore_Base)

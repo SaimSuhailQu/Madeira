@@ -19,6 +19,14 @@ for path in "${required[@]}"; do
   [[ -f "$path" ]] || { echo "ERROR: required build artifact missing: $path" >&2; exit 1; }
 done
 
+echo "=== Verifying libFEXCore_Base.a Allocator symbols before xcodebuild ==="
+if command -v nm >/dev/null; then
+  nm -gU "$ROOT/FEX/build-ios/FEXCore/Source/libFEXCore_Base.a" 2>/dev/null | grep 'Allocator.*memalign' || {
+    echo "ERROR: FEXCore::Allocator::memalign symbol missing from libFEXCore_Base.a" >&2
+    exit 1
+  }
+fi
+
 rm -rf "$DERIVED" "$DIST/Payload"
 mkdir -p "$DIST"
 
