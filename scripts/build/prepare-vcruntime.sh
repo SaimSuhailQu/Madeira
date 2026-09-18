@@ -28,10 +28,16 @@ if (( all_present )); then
 fi
 
 SEVENZIP=""
-if command -v 7zz >/dev/null; then
+if command -v 7zz >/dev/null 2>&1; then
   SEVENZIP="7zz"
-elif command -v 7z >/dev/null; then
+elif command -v 7z >/dev/null 2>&1; then
   SEVENZIP="7z"
+elif command -v brew >/dev/null 2>&1 && [[ -x "$(brew --prefix sevenzip 2>/dev/null || true)/bin/7zz" ]]; then
+  SEVENZIP="$(brew --prefix sevenzip)/bin/7zz"
+elif [[ -x "/opt/homebrew/bin/7zz" ]]; then
+  SEVENZIP="/opt/homebrew/bin/7zz"
+elif [[ -x "/usr/local/bin/7zz" ]]; then
+  SEVENZIP="/usr/local/bin/7zz"
 else
   echo "ERROR: 7zz or 7z is required (brew install sevenzip)" >&2
   exit 1

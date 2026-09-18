@@ -19,8 +19,10 @@ brew install cmake ninja meson pkg-config autoconf automake libtool bison flex s
 
 BISON_PATH="$(brew --prefix bison 2>/dev/null || true)/bin"
 LLVM_PATH="$(brew --prefix llvm 2>/dev/null || true)/bin"
+SEVENZIP_PATH="$(brew --prefix sevenzip 2>/dev/null || true)/bin"
 if [[ -d "$BISON_PATH" ]]; then export PATH="$BISON_PATH:$PATH"; fi
 if [[ -d "$LLVM_PATH" ]]; then export PATH="$LLVM_PATH:$PATH"; fi
+if [[ -d "$SEVENZIP_PATH" ]]; then export PATH="$SEVENZIP_PATH:$PATH"; fi
 
 log "Checking out submodules"
 git -C "$ROOT" submodule update --init --recursive
