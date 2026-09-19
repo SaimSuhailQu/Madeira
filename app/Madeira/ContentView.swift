@@ -2551,7 +2551,12 @@ struct ContentView: View {
                 logStore.log("Found preinstalled Steam bundle in app resources. Extracting...", level: .info)
                 let targetSteamDir = "\(prefix)/drive_c/Program Files (x86)/Steam"
                 try? fm.createDirectory(atPath: targetSteamDir, withIntermediateDirectories: true)
-                if madeira_extract_prefix_tgz(bundledSteamTgz, targetSteamDir) == 0 {
+                let result = bundledSteamTgz.withCString { archivePath in
+                    targetSteamDir.withCString { destinationPath in
+                        madeira_extract_prefix_tgz(archivePath, destinationPath)
+                    }
+                }
+                if result == 0 {
                     logStore.log("Preinstalled Steam extracted successfully.", level: .success)
                     if fm.fileExists(atPath: "\(targetSteamDir)/steam.exe") {
                         winDirFound = "C:\\Program Files (x86)\\Steam"
@@ -2627,7 +2632,11 @@ struct ContentView: View {
                     if fm.fileExists(atPath: tempArchive) { try fm.removeItem(atPath: tempArchive) }
                     try fm.copyItem(at: selectedURL, to: URL(fileURLWithPath: tempArchive))
                     
-                    let extractResult = madeira_extract_prefix_tgz(tempArchive, targetDir)
+                    let extractResult = tempArchive.withCString { archivePath in
+                        targetDir.withCString { destinationPath in
+                            madeira_extract_prefix_tgz(archivePath, destinationPath)
+                        }
+                    }
                     try? fm.removeItem(atPath: tempArchive)
                     
                     if extractResult == 0 {
