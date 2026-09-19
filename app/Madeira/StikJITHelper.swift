@@ -167,6 +167,9 @@ enum StikJITHelper {
         guard let rxPtr = rxPtrOpt else {
             LogStore.shared.log("BAD POOL: No valid JIT memory placement after retries.", level: .error)
             LogStore.shared.log("Try adjusting JIT Pool Size in Settings (e.g. 256MB or 384MB).", level: .info)
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: NSNotification.Name("MadeiraBadPoolNotification"), object: nil)
+            }
             return nil
         }
         let rxAddr = Int(bitPattern: rxPtr)

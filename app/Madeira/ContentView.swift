@@ -1109,6 +1109,9 @@ struct ContentView: View {
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
     @Environment(\.verticalSizeClass) private var vSizeClass
 
+    @State private var showJITAlert = false
+    @State private var showBadPoolAlert = false
+
     enum JITStatus {
         case unknown
         case testing
@@ -1171,6 +1174,25 @@ struct ContentView: View {
                     jitPoolMB: $jitPoolMB,
                     phoneOptimization: $phoneOptimization
                 )
+            }
+            .alert("JIT Not Enabled", isPresented: $showJITAlert) {
+                Button("Enable JIT via StikDebug") {
+                    enableJITViaStikDebug()
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Wine emulation strictly requires JIT compilation. Please tap 'Enable JIT' or attach a debugger via SideStore / AltStore / StikDebug first.")
+            }
+            .alert("JIT Memory Pool Placement", isPresented: $showBadPoolAlert) {
+                Button("Open Settings") {
+                    isResolutionSheetPresented = true
+                }
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("Unable to allocate the requested JIT memory pool at the selected size. Try selecting 256MB or 384MB in Phone Settings (⚙️).")
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MadeiraBadPoolNotification"))) { _ in
+                showBadPoolAlert = true
             }
             .onAppear {
                 jit_install_trap_handler()
@@ -1708,24 +1730,11 @@ struct ContentView: View {
                 .tint(.green)
 
                 Button("Wine Virtual Desktop") {
-                    // S3-pre R2v2: raw rpcss.exe CANNOT run standalone —
-                    // its wmain unconditionally StartServiceCtrlDispatcherW's
-                    // (rpcss_main.c:282), which RPCs back to the SCM; without
-                    // services.exe it raised + wedged in
-                    // service_run_main_thread, and explorer's
-                    // CoRegisterClassObject wedged behind it (seq-3680 run).
-                    // Proper bootstrap: explorer's cmdline child = services.exe
-                    // (SCM host, windows-subsystem = no console). It creates
-                    // \pipe\svcctl early, runs auto-start services (MountMgr/
-                    // Eventlog/NDIS/nsiproxy/PlugPlay — winedevice/plugplay
-                    // are bundled; failures tolerated), and combase's
-                    // start_rpcss then demand-starts RpcSs through the SCM
-                    // with a 30s start-pending wait → rpcss runs as services'
-                    // child (3-deep tree, proven depth) with a proper
-                    // dispatcher connection → epmapper up → real COM.
-                    // Known risk: if shellwindows_init beats services.exe's
-                    // RPC_Init, OpenSCManager fails → watch whether that
-                    // fails fast or hits the RaiseException→CS wedge again.
+                    guard jit_check_debugged() else {
+                        logStore.log("Wine Virtual Desktop requires JIT. Tap 'Enable JIT' first.", level: .error)
+                        showJITAlert = true
+                        return
+                    }
                     var deskW = 960
                     var deskH = 540
                     if selectedResolution == "native" {
@@ -2057,6 +2066,9 @@ struct ContentView: View {
     private func runWineFullSequence() {
         guard jit_check_debugged() else {
             logStore.log("JIT not enabled. Press 'Enable JIT' first.", level: .error)
+            DispatchQueue.main.async {
+                self.showJITAlert = true
+            }
             return
         }
 
