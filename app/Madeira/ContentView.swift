@@ -3,6 +3,7 @@ import UIKit
 import QuartzCore
 import Metal
 import os.log
+import UniformTypeIdentifiers
 
 // 2026-07-03 window-hosted Metal layer.
 //
@@ -842,12 +843,14 @@ struct MadeiraMetalView: UIViewRepresentable {
 
 struct ContentView: View {
     @StateObject private var logStore = LogStore.shared
+    @StateObject private var gameControllerManager = GameControllerManager.shared
     @State private var jitStatus: JITStatus = .unknown
     @State private var entitlements: EntitlementStatus?
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
     @State private var pointerPanel = false
     @Namespace private var pointerNS
+    @State private var isFileImporterPresented = false
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
     @Environment(\.verticalSizeClass) private var vSizeClass
 
@@ -886,6 +889,13 @@ struct ContentView: View {
                 jit_install_trap_handler()
                 entitlements = EntitlementStatus.check()
                 logEntitlementStatus()
+            }
+            .fileImporter(
+                isPresented: $isFileImporterPresented,
+                allowedContentTypes: [.item],
+                allowsMultipleSelection: false
+            ) { result in
+                handleImportedFile(result)
             }
         }
     }
@@ -1079,6 +1089,19 @@ struct ContentView: View {
             entitlementBadge("JIT", granted: debuggerAttached)
             entitlementBadge("Memory+", granted: ents.increasedMemory)
             entitlementBadge("64-bit VA", granted: ents.extendedVA)
+            if gameControllerManager.connectedControllersCount > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "gamecontroller.fill")
+                        .foregroundColor(.green)
+                    Text(gameControllerManager.activeControllerName ?? "Controller")
+                        .font(.caption2)
+                        .foregroundColor(.primary)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.15))
+                .cornerRadius(4)
+            }
             Spacer()
             // Device model rides in this row (the old standalone statusHeader
             // row above it spent ~50pt of vertical space on nothing else).
@@ -1433,6 +1456,12 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.mint)
+
+                Button("Install / Run EXE") {
+                    isFileImporterPresented = true
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
 
                 // ml741: Stray (UE4). Launch the shipping binary DIRECTLY rather
                 // than Stray.exe -- the launcher builds its child's command line
@@ -2294,6 +2323,57 @@ struct ContentView: View {
         return true
     }
 
+    /// Import an installer or game executable from iOS Files and launch it under Wine
+    private func handleImportedFile(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure(let error):
+            logStore.log("Failed to select file: \(error.localizedDescription)", level: .error)
+        case .success(let urls):
+            guard let selectedURL = urls.first else { return }
+
+            guard selectedURL.startAccessingSecurityScopedResource() else {
+                logStore.log("Unable to access selected file permission", level: .error)
+                return
+            }
+            defer { selectedURL.stopAccessingSecurityScopedResource() }
+
+            let fm = FileManager.default
+            guard let docDir = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+            let prefix = docDir.appendingPathComponent("wine").path
+            let driveCDir = "\(prefix)/drive_c"
+            let installersDir = "\(driveCDir)/Installers"
+
+            do {
+                if !fm.fileExists(atPath: installersDir) {
+                    try fm.createDirectory(atPath: installersDir, withIntermediateDirectories: true, attributes: nil)
+                }
+
+                let filename = selectedURL.lastPathComponent
+                let destPath = "\(installersDir)/\(filename)"
+
+                if fm.fileExists(atPath: destPath) {
+                    try fm.removeItem(atPath: destPath)
+                }
+                try fm.copyItem(at: selectedURL, to: URL(fileURLWithPath: destPath))
+
+                logStore.log("Imported executable: \(filename) to drive_c\\Installers", level: .success)
+
+                // Configure Wine to launch the installer/executable inside a virtual desktop window
+                let deskW = 1024, deskH = 768
+                setenv("MADEIRA_EXE", "explorer.exe", 1)
+                setenv("MADEIRA_ARGS", "/desktop=shell,\(deskW)x\(deskH) C:\\Installers\\\(filename)", 1)
+                setenv("MADEIRA_DESKTOP", "1", 1)
+                setenv("MADEIRA_SCREEN_W", String(deskW), 1)
+                setenv("MADEIRA_SCREEN_H", String(deskH), 1)
+
+                logStore.log("Launching installer: C:\\Installers\\\(filename)...", level: .info)
+                runWineFullSequence()
+            } catch {
+                logStore.log("Failed to copy installer: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+
     private func startWineserver() {
         logStore.log("Starting wineserver...")
 
@@ -2882,8 +2962,28 @@ struct TouchControlButton: View {
             if down { MetalBackedView.toggleKeyboard() }
         case .none, .joystickWASD, .joystickArrows:
             break                                              // sticks drive themselves
-        case .pad:
-            break     // ml645: no XInput yet — deliberately inert, and labelled so
+        case .pad(let name):
+            // Wire on-screen gamepad touch buttons to standard Windows bindings
+            switch name {
+            case "A": winios_post_key(0x20, down ? 1 : 0) // Space (Jump)
+            case "B": winios_post_key(0x1B, down ? 1 : 0) // Esc (Back/Cancel)
+            case "X": winios_post_key(0x45, down ? 1 : 0) // E (Interact/Action)
+            case "Y": winios_post_key(0x52, down ? 1 : 0) // R (Reload)
+            case "D↑": winios_post_key(0x26, down ? 1 : 0) // Up
+            case "D↓": winios_post_key(0x28, down ? 1 : 0) // Down
+            case "D←": winios_post_key(0x25, down ? 1 : 0) // Left
+            case "D→": winios_post_key(0x27, down ? 1 : 0) // Right
+            case "LB": winios_post_key(0x10, down ? 1 : 0) // Shift (Sprint)
+            case "RB": winios_post_key(0x09, down ? 1 : 0) // Tab (Scoreboard/Inventory)
+            case "LT": winios_pointer(0, 0, down ? 0x0008 : 0x0010, 0) // Right Click
+            case "RT": winios_pointer(0, 0, down ? 0x0002 : 0x0004, 0) // Left Click
+            case "L3": winios_post_key(0x11, down ? 1 : 0) // Ctrl (Crouch)
+            case "R3": winios_post_key(0x46, down ? 1 : 0) // F (Melee/Flashlight)
+            case "Menu": winios_post_key(0x1B, down ? 1 : 0) // Esc
+            case "View": winios_post_key(0x09, down ? 1 : 0) // Tab
+            case "Guide": if down { MetalBackedView.toggleKeyboard() }
+            default: break
+            }
         }
     }
 }
@@ -3021,10 +3121,9 @@ struct MappingPanel: View {
 
     private var controllerTab: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("XInput isn't wired up yet. These save with your layout but do "
-                 + "nothing when pressed — controller support lands with the Wine HID stack.")
+            Text("Gamepad layout: controls map to standard game keys (A=Space, B=Esc, X=E, Y=R, RT=Fire/Left Click, LT=Aim/Right Click, Sticks=WASD/Arrows).")
                 .font(.system(size: 11))
-                .foregroundStyle(.orange.opacity(0.95))
+                .foregroundStyle(.green.opacity(0.95))
                 .fixedSize(horizontal: false, vertical: true)
             section("Face", [("A", .pad("A")), ("B", .pad("B")), ("X", .pad("X")), ("Y", .pad("Y"))])
             section("D-pad", [("D↑", .pad("D↑")), ("D↓", .pad("D↓")),
