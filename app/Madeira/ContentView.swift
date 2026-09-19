@@ -2292,15 +2292,32 @@ struct ContentView: View {
             ("C:\\Program Files\\Steam",       "\(prefix)/drive_c/Program Files/Steam"),
         ]
 
-        guard let (winDir, _) = candidates.first(where: {
+        var winDirFound: String? = candidates.first(where: {
             fm.fileExists(atPath: "\($0.1)/steam.exe")
-        }) else {
+        })?.0
+
+        // If steam is not found in prefix, check if a preinstalled steam archive was bundled in the App
+        if winDirFound == nil {
+            if let bundledSteamTgz = Bundle.main.path(forResource: "steam", ofType: "tar.gz") {
+                logStore.log("Found preinstalled Steam bundle in app resources. Extracting...", level: .info)
+                let targetSteamDir = "\(prefix)/drive_c/Program Files (x86)/Steam"
+                try? fm.createDirectory(atPath: targetSteamDir, withIntermediateDirectories: true)
+                if madeira_extract_prefix_tgz(bundledSteamTgz, targetSteamDir) == 0 {
+                    logStore.log("Preinstalled Steam extracted successfully.", level: .success)
+                    if fm.fileExists(atPath: "\(targetSteamDir)/steam.exe") {
+                        winDirFound = "C:\\Program Files (x86)\\Steam"
+                    }
+                }
+            }
+        }
+
+        guard let winDir = winDirFound else {
             logStore.log("Steam is not installed in this prefix.", level: .error)
             logStore.log("  Searched: Program Files (x86)\\Steam and Program Files\\Steam", level: .info)
             logStore.log("  Valve's SteamSetup.exe cannot be used to install it here: the", level: .info)
             logStore.log("  installer AND the Steam.exe it lays down are 32-bit x86, and this", level: .info)
             logStore.log("  build runs x86-64 only (ARM64EC + FEX, no 32-bit emulator).", level: .info)
-            logStore.log("  Copy an existing 64-bit Steam folder into the prefix instead.", level: .info)
+            logStore.log("  Tip: Tap 'Install / Run EXE' and select a 64-bit Steam .tar.gz archive or folder.", level: .info)
             return false
         }
 
@@ -2323,7 +2340,7 @@ struct ContentView: View {
         return true
     }
 
-    /// Import an installer or game executable from iOS Files and launch it under Wine
+    /// Import an installer (.exe) or archive (.zip, .tar.gz) from iOS Files into Wine
     private func handleImportedFile(_ result: Result<[URL], Error>) {
         switch result {
         case .failure(let error):
@@ -2342,15 +2359,45 @@ struct ContentView: View {
             let prefix = docDir.appendingPathComponent("wine").path
             let driveCDir = "\(prefix)/drive_c"
             let installersDir = "\(driveCDir)/Installers"
+            let filename = selectedURL.lastPathComponent
+            let lowerFilename = filename.lowercased()
+
+            // Robust feature: If user imports a Steam archive (zip / tgz / tar.gz) or game archive,
+            // extract it into drive_c automatically!
+            if lowerFilename.hasSuffix(".tar.gz") || lowerFilename.hasSuffix(".tgz") {
+                logStore.log("Detected tar.gz archive: \(filename). Extracting to drive_c...", level: .info)
+                let targetDir: String
+                if lowerFilename.contains("steam") {
+                    targetDir = "\(driveCDir)/Program Files (x86)/Steam"
+                } else {
+                    targetDir = driveCDir
+                }
+                do {
+                    try fm.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
+                    let tempArchive = "\(targetDir)/\(filename)"
+                    if fm.fileExists(atPath: tempArchive) { try fm.removeItem(atPath: tempArchive) }
+                    try fm.copyItem(at: selectedURL, to: URL(fileURLWithPath: tempArchive))
+                    
+                    let extractResult = madeira_extract_prefix_tgz(tempArchive, targetDir)
+                    try? fm.removeItem(atPath: tempArchive)
+                    
+                    if extractResult == 0 {
+                        logStore.log("Successfully extracted \(filename) to \(targetDir)", level: .success)
+                    } else {
+                        logStore.log("Failed to extract \(filename)", level: .error)
+                    }
+                } catch {
+                    logStore.log("Error extracting archive: \(error.localizedDescription)", level: .error)
+                }
+                return
+            }
 
             do {
                 if !fm.fileExists(atPath: installersDir) {
                     try fm.createDirectory(atPath: installersDir, withIntermediateDirectories: true, attributes: nil)
                 }
 
-                let filename = selectedURL.lastPathComponent
                 let destPath = "\(installersDir)/\(filename)"
-
                 if fm.fileExists(atPath: destPath) {
                     try fm.removeItem(atPath: destPath)
                 }
@@ -2366,10 +2413,10 @@ struct ContentView: View {
                 setenv("MADEIRA_SCREEN_W", String(deskW), 1)
                 setenv("MADEIRA_SCREEN_H", String(deskH), 1)
 
-                logStore.log("Launching installer: C:\\Installers\\\(filename)...", level: .info)
+                logStore.log("Launching: C:\\Installers\\\(filename)...", level: .info)
                 runWineFullSequence()
             } catch {
-                logStore.log("Failed to copy installer: \(error.localizedDescription)", level: .error)
+                logStore.log("Failed to process imported file: \(error.localizedDescription)", level: .error)
             }
         }
     }
