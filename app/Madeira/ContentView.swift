@@ -843,23 +843,49 @@ struct MadeiraMetalView: UIViewRepresentable {
     func updateUIView(_ uiView: MetalBackedView, context: Context) {}
 }
 
-/// Animated neon-rainbow title view for portrait and landscape
+/// Animated neon-rainbow title view for portrait and landscape with black controller badge and PS5 styling
 struct AnimatedNeonRainbowTitle: View {
     var size: CGFloat = 20
     @State private var phase: CGFloat = 0
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "gamecontroller.fill")
-                .font(.system(size: size * 0.9, weight: .bold))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.pink, .purple, .cyan, .green, .yellow, .orange, .pink],
-                        startPoint: UnitPoint(x: phase - 1, y: 0),
-                        endPoint: UnitPoint(x: phase, y: 1)
+        HStack(spacing: 8) {
+            // Sleek black badge with PS5 / DualSense controller & PlayStation symbols
+            ZStack {
+                Circle()
+                    .fill(Color.black)
+                    .frame(width: size * 1.5, height: size * 1.5)
+                    .overlay(
+                        Circle()
+                            .stroke(
+                                LinearGradient(
+                                    colors: [.cyan, .purple, .pink, .blue, .cyan],
+                                    startPoint: UnitPoint(x: phase - 1, y: 0),
+                                    endPoint: UnitPoint(x: phase, y: 1)
+                                ),
+                                lineWidth: 1.5
+                            )
                     )
-                )
-                .shadow(color: .cyan.opacity(0.8), radius: 6, x: 0, y: 0)
+                    .shadow(color: .cyan.opacity(0.6), radius: 4, x: 0, y: 0)
+
+                Image(systemName: "gamecontroller.fill")
+                    .font(.system(size: size * 0.85, weight: .bold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.pink, .purple, .cyan, .green, .yellow, .orange, .pink],
+                            startPoint: UnitPoint(x: phase - 1, y: 0),
+                            endPoint: UnitPoint(x: phase, y: 1)
+                        )
+                    )
+                    .shadow(color: .cyan.opacity(0.8), radius: 5, x: 0, y: 0)
+
+                // PS5 glyph indicator overlay
+                Text("PS5")
+                    .font(.system(size: size * 0.32, weight: .black, design: .rounded))
+                    .foregroundColor(.white)
+                    .offset(x: size * 0.42, y: size * 0.42)
+                    .shadow(color: .blue, radius: 2)
+            }
 
             Text("Madeira")
                 .font(.system(size: size, weight: .heavy, design: .rounded))
@@ -872,6 +898,24 @@ struct AnimatedNeonRainbowTitle: View {
                 )
                 .shadow(color: .purple.opacity(0.8), radius: 8, x: 0, y: 0)
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.85))
+                .overlay(
+                    Capsule()
+                        .stroke(
+                            LinearGradient(
+                                colors: [.purple.opacity(0.6), .cyan.opacity(0.6), .pink.opacity(0.6)],
+                                startPoint: UnitPoint(x: phase - 1, y: 0),
+                                endPoint: UnitPoint(x: phase, y: 1)
+                            ),
+                            lineWidth: 1
+                        )
+                )
+                .shadow(color: .black.opacity(0.5), radius: 6, x: 0, y: 2)
+        )
         .onAppear {
             withAnimation(.linear(duration: 4.0).repeatForever(autoreverses: false)) {
                 phase = 2.0
