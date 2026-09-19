@@ -1004,26 +1004,67 @@ struct ControllerSetupSheet: View {
     }
 }
 
-/// Custom & Native Wine Desktop Resolution settings sheet
-struct ResolutionSettingsSheet: View {
+/// Phone & System Optimization, JIT Pool Size, and Wine Desktop Resolution settings sheet
+struct PhoneSettingsSheet: View {
     @Binding var selectedRes: String
+    @Binding var jitPoolMB: Int
+    @Binding var phoneOptimization: Bool
     @Environment(\.dismiss) private var dismiss
 
-    let options = [
+    let resOptions = [
         ("Native Screen (Auto / Full)", "native"),
         ("1920 x 1080 (1080p FHD)", "1920x1080"),
         ("1600 x 900 (900p HD+)", "1600x900"),
         ("1280 x 720 (720p HD)", "1280x720"),
         ("1024 x 768 (4:3 Standard)", "1024x768"),
-        ("960 x 540 (qHD / Default)", "960x540"),
+        ("960 x 540 (qHD / Recommended)", "960x540"),
         ("800 x 600 (SVGA Classic)", "800x600")
+    ]
+
+    let poolOptions: [(String, Int)] = [
+        ("256 MB (Ultra-Light / Safe for 4GB Devices)", 256),
+        ("384 MB (Recommended for iPhone XS / 11 / 12)", 384),
+        ("512 MB (Balanced)", 512),
+        ("640 MB (Medium Games)", 640),
+        ("896 MB (Large / Steam CEF Default)", 896),
+        ("1024 MB (Maximum - Pro/iPad Devices Only)", 1024)
     ]
 
     var body: some View {
         NavigationStack {
             Form {
-                Section(header: Text("Wine Desktop Resolution")) {
-                    ForEach(options, id: \.1) { label, value in
+                Section(header: Text("Device & Memory Optimization"),
+                        footer: Text("Optimizes memory and background buffers to avoid iOS Jetsam crash-to-home-screen on phones with 4GB RAM.")) {
+                    Toggle("Phone Hardware Optimization", isOn: $phoneOptimization)
+                        .tint(.green)
+                }
+
+                Section(header: Text("JIT Pool Size"),
+                        footer: Text("Size of executable JIT memory allocated for x86-64 code. On iPhone XS (4GB RAM), 256MB or 384MB prevents iOS kernel termination.")) {
+                    ForEach(poolOptions, id: \.1) { label, mb in
+                        HStack {
+                            Text(label)
+                                .font(.system(size: 14))
+                            Spacer()
+                            if jitPoolMB == mb {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            jitPoolMB = mb
+                            // Persist to Documents/madeira-pool.txt as well
+                            if let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                                try? "\(mb)".write(to: d.appendingPathComponent("madeira-pool.txt"), atomically: true, encoding: .utf8)
+                            }
+                        }
+                    }
+                }
+
+                Section(header: Text("Wine Desktop Resolution"),
+                        footer: Text("Resolution changes apply to the next Wine desktop launch. Madeira itself can stay open.")) {
+                    ForEach(resOptions, id: \.1) { label, value in
                         HStack {
                             Text(label)
                             Spacer()
@@ -1038,11 +1079,8 @@ struct ResolutionSettingsSheet: View {
                         }
                     }
                 }
-                Section(footer: Text("Resolution changes apply to the next Wine desktop launch, not a running game. Madeira itself can stay open.")) {
-                    EmptyView()
-                }
             }
-            .navigationTitle("Resolution Settings")
+            .navigationTitle("Phone & Display Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -1066,6 +1104,8 @@ struct ContentView: View {
     @State private var isResolutionSheetPresented = false
     @State private var isControllerSheetPresented = false
     @AppStorage("wine_desktop_res") private var selectedResolution: String = "960x540"
+    @AppStorage("jit_pool_mb") private var jitPoolMB: Int = 384 // Default to 384MB for phone memory safety
+    @AppStorage("phone_optimization") private var phoneOptimization: Bool = true
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
     @Environment(\.verticalSizeClass) private var vSizeClass
 
@@ -1114,7 +1154,7 @@ struct ContentView: View {
                         Button {
                             isResolutionSheetPresented = true
                         } label: {
-                            Image(systemName: "display")
+                            Image(systemName: "gearshape")
                                 .font(.system(size: 16, weight: .semibold))
                         }
                     }
@@ -1126,7 +1166,11 @@ struct ContentView: View {
                 ControllerSetupSheet()
             }
             .sheet(isPresented: $isResolutionSheetPresented) {
-                ResolutionSettingsSheet(selectedRes: $selectedResolution)
+                PhoneSettingsSheet(
+                    selectedRes: $selectedResolution,
+                    jitPoolMB: $jitPoolMB,
+                    phoneOptimization: $phoneOptimization
+                )
             }
             .onAppear {
                 jit_install_trap_handler()
@@ -2123,13 +2167,21 @@ struct ContentView: View {
             // so it can be swapped between runs without a rebuild, and deleting
             // the file reverts to the proven default. Clamped to sane values --
             // a typo here would otherwise move the VA floor with it.
-            var poolSizeMB = 896
+            // JIT Pool Size is controlled via Phone Settings (default 384MB for phone stability)
+            var poolSizeMB = jitPoolMB
             if let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
                let txt = try? String(contentsOf: d.appendingPathComponent("madeira-pool.txt"), encoding: .utf8),
                let mb = Int(txt.trimmingCharacters(in: .whitespacesAndNewlines)),
                mb >= 256, mb <= 1152 {
                 poolSizeMB = mb
-                logStore.log("JIT pool overridden to \(mb)MB via madeira-pool.txt")
+            }
+            logStore.log("Using JIT pool size: \(poolSizeMB)MB (Phone Optimization: \(phoneOptimization ? "ON" : "OFF"))", level: .info)
+
+            // Phone Hardware Optimization: Clamp extra buffers on phones to keep total footprint low
+            if phoneOptimization {
+                setenv("MADEIRA_PHONE_OPT", "1", 1)
+                // Limit surface queue bursts to prevent spikes in physical memory
+                setenv("MADEIRA_SURF_SEQ", "4", 1)
             }
             // ml694: W^X A/B switch. Documents/madeira-wx.txt containing "0"
             // disables page demotion for the SAME binary, so the on/off
