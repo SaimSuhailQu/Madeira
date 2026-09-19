@@ -466,6 +466,7 @@ final class JoystickPadState: ObservableObject {
     /// of this class), so the row's .transition(.opacity) cannot reach it and it
     /// stayed visible while every other button faded. It has to fade itself.
     @Published var hidden = false
+    @Published var inFullscreen = false
 }
 
 /// Window-level host for the pad. Transparent and non-interactive: the
@@ -542,8 +543,8 @@ struct JoystickPadOverlay: View {
         // sit under the game strip instead of centred on the button.
         .ignoresSafeArea()
         .allowsHitTesting(false)
-        .opacity(s.hidden ? 0 : 1)
-        .animation(.easeInOut(duration: 0.28), value: s.hidden)
+        .opacity((s.hidden || s.inFullscreen) ? 0 : 1)
+        .animation(.easeInOut(duration: 0.28), value: s.hidden || s.inFullscreen)
         .animation(.spring(response: 0.32, dampingFraction: 0.62), value: s.held)
         .animation(.spring(response: 0.22, dampingFraction: 0.58), value: s.dir)
     }
@@ -714,6 +715,7 @@ struct JoystickKeyView: View {
                         }
                     }
             )
+            .opacity(JoystickPadState.shared.inFullscreen ? 0 : 1)
     }
 }
 
@@ -841,6 +843,172 @@ struct MadeiraMetalView: UIViewRepresentable {
     func updateUIView(_ uiView: MetalBackedView, context: Context) {}
 }
 
+/// Animated neon-rainbow title view for portrait and landscape
+struct AnimatedNeonRainbowTitle: View {
+    var size: CGFloat = 20
+    @State private var phase: CGFloat = 0
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "gamecontroller.fill")
+                .font(.system(size: size * 0.9, weight: .bold))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.pink, .purple, .cyan, .green, .yellow, .orange, .pink],
+                        startPoint: UnitPoint(x: phase - 1, y: 0),
+                        endPoint: UnitPoint(x: phase, y: 1)
+                    )
+                )
+                .shadow(color: .cyan.opacity(0.8), radius: 6, x: 0, y: 0)
+
+            Text("Madeira")
+                .font(.system(size: size, weight: .heavy, design: .rounded))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .red],
+                        startPoint: UnitPoint(x: phase - 1, y: 0),
+                        endPoint: UnitPoint(x: phase, y: 1)
+                    )
+                )
+                .shadow(color: .purple.opacity(0.8), radius: 8, x: 0, y: 0)
+        }
+        .onAppear {
+            withAnimation(.linear(duration: 4.0).repeatForever(autoreverses: false)) {
+                phase = 2.0
+            }
+        }
+    }
+}
+
+/// Revamped controller setup sheet with simple On/Off toggle, live input tester, and virtual gamepad settings
+struct ControllerSetupSheet: View {
+    @ObservedObject var manager = GameControllerManager.shared
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Controller Setup") {
+                    Toggle("Enable Game Controllers", isOn: $manager.isEnabled)
+                        .tint(.green)
+
+                    HStack {
+                        Text("Connected Controllers")
+                        Spacer()
+                        Text("\(manager.connectedControllersCount)")
+                            .foregroundColor(.secondary)
+                    }
+
+                    if let name = manager.activeControllerName {
+                        HStack {
+                            Text("Active Device")
+                            Spacer()
+                            Text(name)
+                                .foregroundColor(.primary)
+                        }
+                    } else {
+                        HStack {
+                            Text("Status")
+                            Spacer()
+                            Text(manager.isEnabled ? "Scanning / Retrying..." : "Disabled")
+                                .foregroundColor(manager.isEnabled ? .orange : .secondary)
+                        }
+                    }
+
+                    Button("Scan & Retry Detection") {
+                        manager.refreshControllers()
+                    }
+                    .disabled(!manager.isEnabled)
+                }
+
+                Section("Virtual Gamepad") {
+                    Toggle("Persistent Virtual Gamepad", isOn: $manager.virtualGamepadEnabled)
+                        .tint(.blue)
+                    Text("Keeps the in-game virtual controller active so reconnected controllers immediately regain control without reopening games.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Section("Live Input Tester (DualSense / Xbox / MFi)") {
+                    HStack {
+                        Text("Last Action")
+                        Spacer()
+                        Text(manager.lastPressedButton)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundColor(.green)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Left Stick (WASD): \(String(format: "X: %.2f, Y: %.2f", manager.leftStickValues.x, manager.leftStickValues.y))")
+                            .font(.caption)
+                        Text("Right Stick (Look): \(String(format: "X: %.2f, Y: %.2f", manager.rightStickValues.x, manager.rightStickValues.y))")
+                            .font(.caption)
+                        Text("Triggers (LT/RT): \(String(format: "LT: %.2f, RT: %.2f", manager.triggerValues.0, manager.triggerValues.1))")
+                            .font(.caption)
+                    }
+                    .foregroundColor(.secondary)
+                }
+            }
+            .navigationTitle("Controller Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+/// Custom & Native Wine Desktop Resolution settings sheet
+struct ResolutionSettingsSheet: View {
+    @Binding var selectedRes: String
+    @Environment(\.dismiss) private var dismiss
+
+    let options = [
+        ("Native Screen (Auto / Full)", "native"),
+        ("1920 x 1080 (1080p FHD)", "1920x1080"),
+        ("1600 x 900 (900p HD+)", "1600x900"),
+        ("1280 x 720 (720p HD)", "1280x720"),
+        ("1024 x 768 (4:3 Standard)", "1024x768"),
+        ("960 x 540 (qHD / Default)", "960x540"),
+        ("800 x 600 (SVGA Classic)", "800x600")
+    ]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(header: Text("Wine Desktop Resolution")) {
+                    ForEach(options, id: \.1) { label, value in
+                        HStack {
+                            Text(label)
+                            Spacer()
+                            if selectedRes == value {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedRes = value
+                        }
+                    }
+                }
+                Section(footer: Text("Resolution changes apply to the next Wine desktop launch, not a running game. Madeira itself can stay open.")) {
+                    EmptyView()
+                }
+            }
+            .navigationTitle("Resolution Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var logStore = LogStore.shared
     @StateObject private var gameControllerManager = GameControllerManager.shared
@@ -851,6 +1019,9 @@ struct ContentView: View {
     @State private var pointerPanel = false
     @Namespace private var pointerNS
     @State private var isFileImporterPresented = false
+    @State private var isResolutionSheetPresented = false
+    @State private var isControllerSheetPresented = false
+    @AppStorage("wine_desktop_res") private var selectedResolution: String = "960x540"
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
     @Environment(\.verticalSizeClass) private var vSizeClass
 
@@ -882,9 +1053,37 @@ struct ContentView: View {
             // this if/else (two SwiftUI identities) — HARMLESS since
             // 2026-07-05: MetalHostView is a process-lifetime singleton;
             // a fresh placeholder only re-parents the same CAMetalLayer.
-            .navigationTitle("Madeira")
+            // Animated neon-rainbow title in portrait
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    AnimatedNeonRainbowTitle(size: 20)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    HStack(spacing: 12) {
+                        Button {
+                            isControllerSheetPresented = true
+                        } label: {
+                            Image(systemName: "gamecontroller")
+                                .font(.system(size: 16, weight: .semibold))
+                        }
+
+                        Button {
+                            isResolutionSheetPresented = true
+                        } label: {
+                            Image(systemName: "display")
+                                .font(.system(size: 16, weight: .semibold))
+                        }
+                    }
+                }
+            }
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(vSizeClass == .compact)
+            .sheet(isPresented: $isControllerSheetPresented) {
+                ControllerSetupSheet()
+            }
+            .sheet(isPresented: $isResolutionSheetPresented) {
+                ResolutionSettingsSheet(selectedRes: $selectedResolution)
+            }
             .onAppear {
                 jit_install_trap_handler()
                 entitlements = EntitlementStatus.check()
@@ -979,11 +1178,15 @@ struct ContentView: View {
             ZStack {
                 Color.black
                 MadeiraMetalView()
-                // Controls removed for now (ml586): game-only landscape.
-                // The FPS readout stays, pinned in the right pillarbox bar —
-                // the window-level surface covers anything drawn over the
-                // game area itself, so it cannot ride on the game view.
+                // Animated neon-rainbow title and FPS readout in landscape pillarbox bars
                 HStack(spacing: 0) {
+                    VStack(alignment: .leading) {
+                        AnimatedNeonRainbowTitle(size: 13)
+                            .padding(.leading, 8)
+                            .padding(.top, 8)
+                        Spacer()
+                    }
+                    .frame(width: barW, alignment: .leading)
                     Spacer(minLength: 0)
                     VStack {
                         FPSOverlay(compact: true)
@@ -1103,16 +1306,6 @@ struct ContentView: View {
                 .cornerRadius(4)
             }
             Spacer()
-            // Device model rides in this row (the old standalone statusHeader
-            // row above it spent ~50pt of vertical space on nothing else).
-            VStack(alignment: .trailing, spacing: 0) {
-                Text("Device")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                Text(deviceInfo)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
         }
         .padding(.horizontal)
         .padding(.top, 4)
@@ -1445,7 +1638,19 @@ struct ContentView: View {
                     // Known risk: if shellwindows_init beats services.exe's
                     // RPC_Init, OpenSCManager fails → watch whether that
                     // fails fast or hits the RaiseException→CS wedge again.
-                    let deskW = 960, deskH = 540
+                    var deskW = 960
+                    var deskH = 540
+                    if selectedResolution == "native" {
+                        let b = UIScreen.main.nativeBounds
+                        deskW = Int(max(b.width, b.height))
+                        deskH = Int(min(b.width, b.height))
+                    } else {
+                        let parts = selectedResolution.split(separator: "x")
+                        if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]) {
+                            deskW = w
+                            deskH = h
+                        }
+                    }
                     setenv("MADEIRA_EXE", "explorer.exe", 1)
                     setenv("MADEIRA_ARGS",
                            "/desktop=shell,\(deskW)x\(deskH) C:\\windows\\system32\\services.exe", 1)
@@ -2670,6 +2875,7 @@ final class TouchControlsModel: ObservableObject {
 
     @Published var controls: [TouchControl] = [] { didSet { save() } }
     @Published var visible = true               { didSet { save() } }
+    @Published var glassStyling = true          { didSet { save() } }
     @Published var editing = false              // transient, never persisted
     @Published var selected: UUID?              // transient
 
@@ -2679,7 +2885,7 @@ final class TouchControlsModel: ObservableObject {
             .appendingPathComponent("madeira-controls.json")
     }
 
-    private struct Saved: Codable { var controls: [TouchControl]; var visible: Bool }
+    private struct Saved: Codable { var controls: [TouchControl]; var visible: Bool; var glassStyling: Bool? }
 
     private init() {
         loading = true
@@ -2687,13 +2893,14 @@ final class TouchControlsModel: ObservableObject {
            let s = try? JSONDecoder().decode(Saved.self, from: d) {
             controls = s.controls
             visible  = s.visible
+            glassStyling = s.glassStyling ?? true
         }
         loading = false
     }
 
     private func save() {
         guard !loading else { return }
-        guard let d = try? JSONEncoder().encode(Saved(controls: controls, visible: visible))
+        guard let d = try? JSONEncoder().encode(Saved(controls: controls, visible: visible, glassStyling: glassStyling))
         else { return }
         try? d.write(to: Self.url, options: .atomic)
     }
@@ -2713,12 +2920,11 @@ final class TouchControlsModel: ObservableObject {
     /// touch in the window. Nothing responded, and edit mode — whose branch
     /// captured everything — could never be entered to mask it.
     func hitsInteractive(_ p: CGPoint, in bounds: CGRect) -> Bool {
-        // Top bar: two 44pt buttons 10pt apart in play mode, centred, 10pt down.
-        // Padded generously; a few points of slop costs nothing and a missed tap
-        // costs a build.
-        let barW: CGFloat = 2 * 44 + 10
-        if CGRect(x: bounds.midX - barW / 2 - 10, y: 0,
-                  width: barW + 20, height: 68).contains(p) { return true }
+        // Adjusted fullscreen / menu button positions: Top bar buttons (gamecontroller, pencil/checkmark, etc.)
+        // Padded generously; buttons auto-hide after 6s but remain tappable while invisible.
+        let barW: CGFloat = 3 * 48 + 30
+        if CGRect(x: bounds.midX - barW / 2 - 15, y: 0,
+                  width: barW + 30, height: 74).contains(p) { return true }
         guard visible else { return false }
         for c in controls {
             let r = Self.baseDiameter * CGFloat(c.scale) / 2
@@ -2781,6 +2987,21 @@ enum TouchControlsHost {
 struct TouchControlsOverlay: View {
     @ObservedObject private var m = TouchControlsModel.shared
     @State private var pinchBase: Double?
+    @State private var controlsVisible = true
+    @State private var hideTimer: Timer?
+
+    private func resetAutoHideTimer() {
+        hideTimer?.invalidate()
+        controlsVisible = true
+        // Auto-hide fullscreen buttons after 6 seconds while keeping them tappable
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { _ in
+            withAnimation(.easeInOut(duration: 0.35)) {
+                if !m.editing {
+                    controlsVisible = false
+                }
+            }
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -2794,6 +3015,7 @@ struct TouchControlsOverlay: View {
                         }
                     }
                     topBar
+                        .onAppear { resetAutoHideTimer() }
                     if m.editing, let i = m.index(of: m.selected) {
                         MappingPanel(control: m.controls[i], screen: geo.size)
                     }
@@ -2807,11 +3029,20 @@ struct TouchControlsOverlay: View {
     }
 
     private var topBar: some View {
-        HStack(spacing: 10) {
-            glassButton("gamecontroller", dim: !m.visible) { m.visible.toggle() }
+        HStack(spacing: 12) {
+            glassButton("gamecontroller", dim: !m.visible) {
+                m.visible.toggle()
+                resetAutoHideTimer()
+            }
             glassButton(m.editing ? "checkmark" : "pencil") {
                 m.editing.toggle()
-                if !m.editing { m.selected = nil }
+                if !m.editing {
+                    m.selected = nil
+                    resetAutoHideTimer()
+                } else {
+                    controlsVisible = true
+                    hideTimer?.invalidate()
+                }
             }
             if m.editing {
                 glassButton("plus") {
@@ -2825,7 +3056,9 @@ struct TouchControlsOverlay: View {
                 .transition(.opacity.combined(with: .scale))
             }
         }
-        .padding(.top, 10)
+        .padding(.top, 12)
+        .opacity(controlsVisible || m.editing ? 1.0 : 0.02) // Auto-hide after 6s but remains tappable while invisible
+        .animation(.easeInOut(duration: 0.28), value: controlsVisible)
         .animation(.easeInOut(duration: 0.22), value: m.editing)
     }
 
@@ -2844,15 +3077,23 @@ struct TouchControlsOverlay: View {
     private func glassButton(_ system: String, dim: Bool = false,
                              _ action: @escaping () -> Void) -> some View {
         Button {
+            resetAutoHideTimer()
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             withAnimation(.easeInOut(duration: 0.22)) { action() }
         } label: {
-            // Stroke only — never a .fill variant.
             Image(systemName: system)
                 .font(.system(size: 18, weight: .regular))
                 .foregroundStyle(.white.opacity(dim ? 0.35 : 1.0))
                 .frame(width: 44, height: 44)
-                .background(GlassShape(circle: true))
+                .background(
+                    Group {
+                        if m.glassStyling {
+                            GlassShape(circle: true)
+                        } else {
+                            Circle().fill(Color.black.opacity(0.4))
+                        }
+                    }
+                )
         }
         .buttonStyle(.plain)
     }

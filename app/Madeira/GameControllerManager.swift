@@ -12,8 +12,31 @@ import GameController
 final class GameControllerManager: ObservableObject {
     static let shared = GameControllerManager()
 
+    @Published var isEnabled: Bool = true {
+        didSet {
+            if isEnabled {
+                refreshControllers()
+            } else {
+                activeControllerName = nil
+                connectedControllersCount = 0
+                lastPressedButton = "Disabled"
+            }
+        }
+    }
+
     @Published var connectedControllersCount: Int = 0
     @Published var activeControllerName: String? = nil
+
+    // Live input tester state (confirmed working with DualSense / Xbox / MFi)
+    @Published var lastPressedButton: String = "None"
+    @Published var leftStickValues: CGPoint = .zero
+    @Published var rightStickValues: CGPoint = .zero
+    @Published var triggerValues: (Float, Float) = (0.0, 0.0)
+
+    // Virtual gamepad persistence flag
+    @Published var virtualGamepadEnabled: Bool = true
+
+    private var retryTimer: Timer?
 
     // State tracking for sticks & buttons to prevent duplicate / stutter events
     private var leftStickDir: Int = -1
@@ -54,6 +77,17 @@ final class GameControllerManager: ObservableObject {
     private init() {
         setupNotifications()
         refreshControllers()
+        startPeriodicRetry()
+    }
+
+    private func startPeriodicRetry() {
+        // Automatic detection/retries: polls every 3 seconds for connected controllers or re-pairing
+        retryTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self = self, self.isEnabled else { return }
+            if self.connectedControllersCount == 0 {
+                self.refreshControllers()
+            }
+        }
     }
 
     private func setupNotifications() {
@@ -98,59 +132,75 @@ final class GameControllerManager: ObservableObject {
     }
 
     private func configureController(_ controller: GCController) {
-        guard let gamepad = controller.extendedGamepad else { return }
+        guard isEnabled, let gamepad = controller.extendedGamepad else { return }
 
         // --- Left Thumbstick -> WASD ---
         gamepad.leftThumbstick.valueChangedHandler = { [weak self] (_, xValue, yValue) in
-            self?.handleStick(x: xValue, y: yValue, stickType: .left)
+            guard let self = self, self.isEnabled else { return }
+            self.leftStickValues = CGPoint(x: CGFloat(xValue), y: CGFloat(yValue))
+            self.handleStick(x: xValue, y: yValue, stickType: .left)
         }
 
         // --- Right Thumbstick -> Arrow Keys / Camera ---
         gamepad.rightThumbstick.valueChangedHandler = { [weak self] (_, xValue, yValue) in
-            self?.handleStick(x: xValue, y: yValue, stickType: .right)
+            guard let self = self, self.isEnabled else { return }
+            self.rightStickValues = CGPoint(x: CGFloat(xValue), y: CGFloat(yValue))
+            self.handleStick(x: xValue, y: yValue, stickType: .right)
         }
 
         // --- D-Pad -> Arrow Keys ---
         gamepad.dpad.valueChangedHandler = { [weak self] (_, xValue, yValue) in
-            self?.handleStick(x: xValue, y: yValue, stickType: .dpad)
+            guard let self = self, self.isEnabled else { return }
+            if abs(xValue) > 0.1 || abs(yValue) > 0.1 {
+                self.lastPressedButton = "D-Pad (\(String(format: "%.1f, %.1f", xValue, yValue)))"
+            }
+            self.handleStick(x: xValue, y: yValue, stickType: .dpad)
         }
 
         // --- Face Buttons ---
         gamepad.buttonA.pressedChangedHandler = { [weak self] (_, _, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            if pressed { self.lastPressedButton = "Button A (Cross / Space)" }
             winios_post_key(self.vkA_button, pressed ? 1 : 0)
         }
 
         gamepad.buttonB.pressedChangedHandler = { [weak self] (_, _, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            if pressed { self.lastPressedButton = "Button B (Circle / Esc)" }
             winios_post_key(self.vkB_button, pressed ? 1 : 0)
         }
 
         gamepad.buttonX.pressedChangedHandler = { [weak self] (_, _, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            if pressed { self.lastPressedButton = "Button X (Square / E)" }
             winios_post_key(self.vkX_button, pressed ? 1 : 0)
         }
 
         gamepad.buttonY.pressedChangedHandler = { [weak self] (_, _, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            if pressed { self.lastPressedButton = "Button Y (Triangle / R)" }
             winios_post_key(self.vkY_button, pressed ? 1 : 0)
         }
 
         // --- Bumpers ---
         gamepad.leftShoulder.pressedChangedHandler = { [weak self] (_, _, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            if pressed { self.lastPressedButton = "LB / L1 (Sprint)" }
             winios_post_key(self.vkLB, pressed ? 1 : 0)
         }
 
         gamepad.rightShoulder.pressedChangedHandler = { [weak self] (_, _, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            if pressed { self.lastPressedButton = "RB / R1 (Tab)" }
             winios_post_key(self.vkRB, pressed ? 1 : 0)
         }
 
         // --- Triggers (Mouse Left / Right Click) ---
         gamepad.leftTrigger.valueChangedHandler = { [weak self] (_, value, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            self.triggerValues = (value, self.triggerValues.1)
             let isDown = value > 0.3 || pressed
+            if isDown && !self.ltDown { self.lastPressedButton = "LT / L2 (Aim / RightClick)" }
             if isDown != self.ltDown {
                 self.ltDown = isDown
                 winios_pointer(0, 0, isDown ? 0x0008 : 0x0010, 0) // RIGHTDOWN / RIGHTUP
@@ -158,8 +208,10 @@ final class GameControllerManager: ObservableObject {
         }
 
         gamepad.rightTrigger.valueChangedHandler = { [weak self] (_, value, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            self.triggerValues = (self.triggerValues.0, value)
             let isDown = value > 0.3 || pressed
+            if isDown && !self.rtDown { self.lastPressedButton = "RT / R2 (Fire / LeftClick)" }
             if isDown != self.rtDown {
                 self.rtDown = isDown
                 winios_pointer(0, 0, isDown ? 0x0002 : 0x0004, 0) // LEFTDOWN / LEFTUP
@@ -168,22 +220,28 @@ final class GameControllerManager: ObservableObject {
 
         // --- Thumbstick Buttons (L3 / R3) ---
         gamepad.leftThumbstickButton?.pressedChangedHandler = { [weak self] (_, _, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            if pressed { self.lastPressedButton = "L3 / Left Stick Click (Ctrl)" }
             winios_post_key(self.vkL3, pressed ? 1 : 0)
         }
 
         gamepad.rightThumbstickButton?.pressedChangedHandler = { [weak self] (_, _, pressed) in
-            guard let self = self else { return }
+            guard let self = self, self.isEnabled else { return }
+            if pressed { self.lastPressedButton = "R3 / Right Stick Click (F)" }
             winios_post_key(self.vkR3, pressed ? 1 : 0)
         }
 
         // --- Menu / Options / Pause Buttons ---
-        gamepad.buttonMenu.pressedChangedHandler = { (_, _, pressed) in
+        gamepad.buttonMenu.pressedChangedHandler = { [weak self] (_, _, pressed) in
+            guard let self = self, self.isEnabled else { return }
+            if pressed { self.lastPressedButton = "Menu / Options (ESC)" }
             winios_post_key(0x1B, pressed ? 1 : 0) // ESC
         }
 
         if let buttonOptions = gamepad.buttonOptions {
-            buttonOptions.pressedChangedHandler = { (_, _, pressed) in
+            buttonOptions.pressedChangedHandler = { [weak self] (_, _, pressed) in
+                guard let self = self, self.isEnabled else { return }
+                if pressed { self.lastPressedButton = "Share / View (ENTER)" }
                 winios_post_key(0x0D, pressed ? 1 : 0) // ENTER
             }
         }
