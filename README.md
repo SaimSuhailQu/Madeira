@@ -17,15 +17,17 @@ breaking changes.
 
 ## Requirements
 
-- A non-jailbroken iPhone. Development has been on an A15 (iPhone 13 Pro).
-- JIT, which on iOS requires a debugger to attach —
-  [StikDebug](https://github.com/0-Blu/StikJIT) is what this project uses.
-- An Apple ID for signing. A free account works; its provisioning profiles
-  expire after 7 days, so the app must be rebuilt and reinstalled weekly. The
-  app's container survives reinstall, so prefixes and saves are preserved.
+## Auto-Updates (SideStore / AltStore / LiveContainer Source)
 
-Because JIT requires debugger attach, this app cannot be distributed through the
-App Store. It is installed by sideloading.
+You can add Madeira directly to **SideStore**, **AltStore**, or **LiveContainer** to receive automatic updates:
+
+1. In SideStore / AltStore, navigate to the **Sources** tab.
+2. Tap **+** and add the repository source URL:
+   ```
+   https://raw.githubusercontent.com/SaimSuhailQu/Madeira/main/apps.json
+   ```
+3. Madeira will appear in your browse list and notify you whenever a new release build is published!
+4. For **LiveContainer**, open LiveContainer and add Madeira using the source URL or download the IPA directly from [Releases](https://github.com/SaimSuhailQu/Madeira/releases). JIT is natively dual-mapped.
 
 ## Building
 

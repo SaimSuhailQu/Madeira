@@ -16,6 +16,8 @@ jobs:
     name: Build IPA
     runs-on: macos-14
     timeout-minutes: 360
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository and submodules
@@ -141,3 +143,18 @@ jobs:
           name: Madeira-ipa
           path: dist/Madeira.ipa
           if-no-files-found: error
+
+      - name: Publish Release for SideStore / LiveContainer Auto-Update
+        if: github.ref == 'refs/heads/main' && success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Madeira Latest"
+          body: |
+            Automated latest build for Madeira.
+            Add this repo source to SideStore or LiveContainer to receive automatic updates:
+            `https://raw.githubusercontent.com/SaimSuhailQu/Madeira/main/apps.json`
+          files: dist/Madeira.ipa
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

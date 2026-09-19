@@ -67,20 +67,41 @@ enum StikJITHelper {
         }
     }
 
-    /// Allocate a JIT memory pool via BRK #0xf00d, then detach the debugger.
+    /// Tracks whether StikDebug protocol was used (so we only detach if attached)
+    static var usedStikDebug: Bool = false
+
+    /// Allocate a JIT memory pool via direct dual mapping (native) or fallback to StikDebug BRK #0xf00d.
     /// Call this after CS_DEBUGGED is confirmed.
     /// Returns the allocated RX base address and RW mapping, or nil on failure.
     static func allocateAndDetach(poolSize: Int = 128 * 1024 * 1024) -> (rx: UnsafeMutableRawPointer, rw: UnsafeMutableRawPointer, size: Int)? {
         guard let result = allocatePool(poolSize: poolSize) else { return nil }
-        // Don't detach yet — Wine needs the debugger to prepare PE DLL code pages.
+        // Don't detach yet — Wine needs the debugger to prepare PE DLL code pages if StikDebug was used.
         // Detach will happen later via detachDebugger().
         return result
     }
 
-    /// Allocate a JIT memory pool via BRK #0xf00d WITHOUT detaching the debugger.
-    /// The debugger stays attached so Wine can use BRK to prepare PE code pages.
+    /// Allocate a JIT memory pool.
+    /// First attempts native dual-mapping (used by MeloNX, LiveContainer, TrollStore, SideStore).
+    /// If native creation is not available, falls back to StikDebug protocol.
     static func allocatePool(poolSize: Int = 128 * 1024 * 1024) -> (rx: UnsafeMutableRawPointer, rw: UnsafeMutableRawPointer, size: Int)? {
-        LogStore.shared.log("Allocating \(poolSize / 1024 / 1024)MB JIT pool via debugger...")
+        // Ensure SIGTRAP safety handler is installed so unhandled BRKs never crash the app
+        jit_install_trap_handler()
+
+        // 1. Try direct native dual-mapping (MeloNX / LiveContainer / TrollStore / SideStore)
+        LogStore.shared.log("Attempting direct dual-mapped JIT allocation (\(poolSize / 1024 / 1024)MB)...")
+        var nativeRx: UnsafeMutableRawPointer? = nil
+        var nativeRw: UnsafeMutableRawPointer? = nil
+        if jit_create_pool_dual_map(poolSize, &nativeRx, &nativeRw),
+           let rx = nativeRx, let rw = nativeRw {
+            let rxAddr = Int(bitPattern: rx)
+            let rwAddr = Int(bitPattern: rw)
+            LogStore.shared.log(String(format: "Native dual-mapping SUCCEEDED! RX=%p, RW=%p", rxAddr, rwAddr), level: .success)
+            usedStikDebug = false
+            return (rx: rx, rw: rw, size: poolSize)
+        }
+
+        LogStore.shared.log("Direct dual-mapping failed or unavailable, falling back to StikDebug protocol...")
+        usedStikDebug = true
 
         // iOS-Madeira: FEX's dispatcher emit has a position-dependent encoding
         // bug — only works when the JIT pool lands at a high enough address
@@ -94,14 +115,6 @@ enum StikJITHelper {
         // freeing them could let iOS reuse them and cause aliasing issues.
         var pinChunks: [vm_address_t] = []
         let chunkSize = 16 * 1024 * 1024  // 16 MB per chunk
-        // Pin until the allocation frontier crosses the mode-A threshold
-        // (0x119000000) instead of a fixed 96MB. A fixed count loses the
-        // ASLR lottery whenever the base slide is low (observed 2026-07-03:
-        // 6 chunks ended at 0x118790000, pool landed 8.4MB short of the
-        // threshold and the run fast-failed). vm_allocate is zero-fill
-        // reserve-only, so extra chunks don't add resident footprint.
-        // The BAD POOL check below stays as the safety net for non-
-        // sequential placements.
         let pinTarget: vm_address_t = 0x119000000
         let maxChunks = 32                 // safety cap (512 MB of reservation)
         for i in 0..<maxChunks {
@@ -118,29 +131,6 @@ enum StikJITHelper {
         }
 
         // Ask debugger to allocate RX pages (x0=0 triggers _M allocation).
-        // With pin chunks claimed, this should land at a higher address.
-        //
-        // Two placement constraints (violating either bricks the session):
-        // - LOW BOUND: FEX has a position-dependent emit bug below
-        //   0x119000000 (mode A: dispatcher branches to zero memory before
-        //   block 0 runs; higher-address mode B is runtime-patched in
-        //   signal_arm64_ios.c init_syscall_frame).
-        // - GUEST WINDOW (ml78, 2026-07-13): with the 896MB pool the kernel
-        //   often places the region at 0x7000000000 — inside the guest
-        //   x86-64 64GB window [0x70,0x80)G where Wine packs PE images and
-        //   the fault handlers classify PCs as guest addresses. Executing
-        //   pool code there hangs the first pool call silently (black
-        //   screen / wallpaper-only desktop).
-        // Reject bad placements and re-roll: a bad region is freed when the
-        // kernel allows, otherwise kept alive as a pin.
-        // ⚠️ ml596: the old claim that the next pick "must land elsewhere" is FALSE.
-        // ml595 freed and re-requested three times and the kernel handed back the
-        // SAME 0x7000000000 hole each time, so the retry loop is not a strategy —
-        // it is three identical attempts. Failure is therefore deterministic within
-        // a launch and the caller must abort rather than run without a pool. A real
-        // fix needs explicit placement (hinted allocation / reserve-and-carve),
-        // not a re-roll; simply pinning the bad region to force a different address
-        // costs another 896MB against the 4096MB jetsam ceiling.
         let goodLow = 0x119000000
         let guestLo = 0x7000000000
         let guestHi = 0x8000000000
@@ -305,6 +295,11 @@ enum StikJITHelper {
 
     /// Detach the debugger. Call this after Wine is done loading PE DLLs.
     static func detachDebugger() {
+        guard usedStikDebug else {
+            LogStore.shared.log("Native dual-mapping in use — skipping debugger detach.")
+            setenv("MADEIRA_DETACHED", "1", 1)
+            return
+        }
         LogStore.shared.log("Detaching debugger...")
         jit26_detach()
         // task #34: signal in-process waiters (share-probe poller). CS_DEBUGGED
