@@ -2487,23 +2487,28 @@ struct ContentView: View {
                     try fm.createDirectory(atPath: installersDir, withIntermediateDirectories: true, attributes: nil)
                 }
 
-                let destPath = "\(installersDir)/\(filename)"
+                // Sanitize filename: replace spaces with underscores so the Wine
+                // MADEIRA_ARGS space-tokenizer never splits the path mid-filename.
+                let safeFilename = filename.replacingOccurrences(of: " ", with: "_")
+                let destPath = "\(installersDir)/\(safeFilename)"
                 if fm.fileExists(atPath: destPath) {
                     try fm.removeItem(atPath: destPath)
                 }
                 try fm.copyItem(at: selectedURL, to: URL(fileURLWithPath: destPath))
 
-                logStore.log("Imported executable: \(filename) to drive_c\\Installers", level: .success)
+                logStore.log("Imported: \(filename) → drive_c\\Installers\\\(safeFilename)", level: .success)
 
-                // Configure Wine to launch the installer/executable inside a virtual desktop window
+                // Configure Wine to launch the installer/executable inside a virtual desktop window.
+                // MADEIRA_EXE = explorer.exe, MADEIRA_ARGS = /desktop=shell,WxH <exe-path>
+                // The exe path is space-free thanks to safeFilename above.
                 let deskW = 1024, deskH = 768
                 setenv("MADEIRA_EXE", "explorer.exe", 1)
-                setenv("MADEIRA_ARGS", "/desktop=shell,\(deskW)x\(deskH) C:\\Installers\\\(filename)", 1)
+                setenv("MADEIRA_ARGS", "/desktop=shell,\(deskW)x\(deskH) C:\\Installers\\\(safeFilename)", 1)
                 setenv("MADEIRA_DESKTOP", "1", 1)
                 setenv("MADEIRA_SCREEN_W", String(deskW), 1)
                 setenv("MADEIRA_SCREEN_H", String(deskH), 1)
 
-                logStore.log("Launching: C:\\Installers\\\(filename)...", level: .info)
+                logStore.log("Launching: C:\\Installers\\\(safeFilename) ...", level: .info)
                 runWineFullSequence()
             } catch {
                 logStore.log("Failed to process imported file: \(error.localizedDescription)", level: .error)

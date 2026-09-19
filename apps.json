@@ -8,7 +8,7 @@
   "apps": [
     {
       "name": "Madeira",
-      "bundleIdentifier": "com.willfaust.mythicemu",
+      "bundleIdentifier": "com.madeira.emulator",
       "developerName": "Madeira Team",
       "version": "0.1.0",
       "versionDate": "2026-09-19",
@@ -29,7 +29,7 @@
       "caption": "Add this source into SideStore or LiveContainer for automatic updates!",
       "date": "2026-09-19",
       "tintColor": "#00E5FF",
-      "appID": "com.willfaust.mythicemu"
+      "appID": "com.madeira.emulator"
     }
   ]
 }
