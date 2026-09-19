@@ -340,8 +340,61 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
         madeira_repair_profile( prefix );
         /* ml581: see madeira_undo_appdata_skeleton() above. */
         madeira_undo_appdata_skeleton( prefix );
+
+        /* iOS-Madeira display driver registry patch.
+         *
+         * Wine's load_desktop_driver() reads:
+         *   HKLM\System\CurrentControlSet\Hardware Profiles\Current\
+         *     Software\Fonts\LogPixels  (for display)
+         * and more importantly loads the GraphicsDriver named under
+         *   HKLM\System\CurrentControlSet\Control\Video\{GUID}\0000
+         * which in a macOS-generated prefix contains "winemac.drv".
+         *
+         * Since none of those DLLs exist in our iOS bundle, every attempt
+         * produces STATUS_DLL_NOT_FOUND (c0000135). We patch system.reg once
+         * to replace any occurrence of "winemac.drv", "winex11.drv", or
+         * "winewayland.drv" as a GraphicsDriver value with "null" — the Wine
+         * sentinel string that causes __wine_set_user_driver(&null_user_driver)
+         * to be called directly, skipping the DLL load. The WINE_IOS block in
+         * load_display_driver() then wires up winios_user_driver.
+         *
+         * Idempotent: marker-gated so it runs at most once per prefix. */
+        {
+            NSString *drvMarker = [prefix stringByAppendingPathComponent:@".madeira-graphicsdrv-patched"];
+            if (![fm fileExistsAtPath:drvMarker]) {
+                NSString *sysRegPath = [prefix stringByAppendingPathComponent:@"system.reg"];
+                NSData *data = [NSData dataWithContentsOfFile:sysRegPath];
+                if (data) {
+                    NSString *regStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                    if (!regStr) regStr = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+                    if (regStr) {
+                        /* Replace the platform driver names with "null" — the sentinel
+                         * Wine checks at driver_ios.c:1506 to skip external DLL loading. */
+                        NSString *patched = regStr;
+                        for (NSString *drv in @[@"winemac.drv", @"winex11.drv", @"winewayland.drv"]) {
+                            /* Match the value assignment syntax: "GraphicsDriver"="winemac.drv" */
+                            NSString *from = [NSString stringWithFormat:@"\"GraphicsDriver\"=\"%@\"", drv];
+                            NSString *to   = @"\"GraphicsDriver\"=\"null\"";
+                            patched = [patched stringByReplacingOccurrencesOfString:from withString:to];
+                        }
+                        if (![patched isEqualToString:regStr]) {
+                            NSData *out = [patched dataUsingEncoding:NSUTF8StringEncoding];
+                            if ([out writeToFile:sysRegPath atomically:YES]) {
+                                LOG("display-drv-patch: system.reg GraphicsDriver → null");
+                            } else {
+                                LOG("display-drv-patch: system.reg write FAILED");
+                            }
+                        } else {
+                            LOG("display-drv-patch: system.reg has no platform GraphicsDriver to patch");
+                        }
+                        [@"patched" writeToFile:drvMarker atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    }
+                }
+            }
+        }
     }
 }
+
 
 static void *wine_process_thread(void *arg) {
     @autoreleasepool {
@@ -411,6 +464,43 @@ static void *wine_process_thread(void *arg) {
         // get_desktop_window's returned HWND fails get_user_object lookup
         // when create_window receives it as req->parent.
         setenv("MADEIRA_WIN32U", "1", 1);
+
+        /* iOS platform driver suppression — fixes "status=c0000135 DLL not found"
+         * for winemac.drv / winex11.drv / winewayland.drv.
+         *
+         * Wine's load_desktop_driver() reads GraphicsDriver from the registry and
+         * calls KeUserModeCallback(NtUserLoadDriver) with that name. On a prefix
+         * that hasn't been patched to say "null", it tries each platform driver in
+         * sequence until one loads. None of those DLLs exist in our iOS bundle, so
+         * every attempt produces STATUS_DLL_NOT_FOUND (c0000135). Setting them
+         * DISABLED here causes the loader to skip the KeUserModeCallback call
+         * entirely; load_display_driver()'s WINE_IOS block then takes over and
+         * wires up winios_user_driver directly.
+         *
+         * "=" alone is DISABLED (not native/builtin) in Wine's DLL-override syntax.
+         * winemac.drv is tried first on arm64-darwin builds; winex11/winewayland
+         * follow as fallbacks. All three must be blocked. */
+        {
+            const char *existing = getenv("WINEDLLOVERRIDES");
+            NSString *base = existing ? [NSString stringWithUTF8String:existing] : @"";
+            NSString *ios_overrides = @"winemac.drv=;winex11.drv=;winewayland.drv=";
+            NSString *combined;
+            if (base.length > 0)
+                combined = [NSString stringWithFormat:@"%@;%@", ios_overrides, base];
+            else
+                combined = ios_overrides;
+            setenv("WINEDLLOVERRIDES", combined.UTF8String, 1);
+            LOG("WINEDLLOVERRIDES=%{public}s", combined.UTF8String);
+        }
+
+        /* Suppress X11 display probe: without DISPLAY set, some Wine code paths
+         * attempt to connect to an X11 display server (which doesn't exist on iOS)
+         * before falling back to the null driver. An empty string suppresses this. */
+        if (!getenv("DISPLAY")) setenv("DISPLAY", "", 1);
+
+        /* Prevent Wine from trying to use shared-memory futex optimisations that
+         * require /dev/futex or similar — not available in the iOS sandbox. */
+        setenv("WINENOSYNC", "1", 0);   /* 0 = don't overwrite if user set it */
 
         /* iOS-Madeira ml711: default FNA to its D3D11 backend.
          *
@@ -612,9 +702,11 @@ static void *wine_process_thread(void *arg) {
         // Otherwise: detect "x64" in the exe name (cube-x64, fib-x64, etc.)
         // OR a Win32 full path (real game launches typically need ARM64EC).
         const char *force_ec = getenv("MADEIRA_USE_ARM64EC");
+        const char *madeira_args = getenv("MADEIRA_ARGS");
         BOOL use_arm64ec = (force_ec && *force_ec == '1') ||
                            (strstr(madeira_exe, "x64") != NULL) ||
-                           (strchr(madeira_exe, '\\') != NULL);
+                           (strchr(madeira_exe, '\\') != NULL) ||
+                           (madeira_args && (strstr(madeira_args, ".exe") != NULL || strstr(madeira_args, ".bat") != NULL));
         const char *bundle_subdir = use_arm64ec ? "arm64ec-windows" : "aarch64-windows";
         LOG("Target exe: %{public}s (bundle=%{public}s)", madeira_exe, bundle_subdir);
         dprintf(STDERR_FILENO, "[WineProc] Target exe: %s (bundle=%s)\n", madeira_exe, bundle_subdir);
