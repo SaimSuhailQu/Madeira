@@ -7,14 +7,14 @@ HOST="$ROOT/toolchains/llvm-host-build"
 IOS="$ROOT/toolchains/llvm-ios-build"
 TAG=llvmorg-15.0.7
 
-if compgen -G "$IOS/lib/libLLVM*.a" >/dev/null; then
-  echo "LLVM iOS: cached"
-  exit 0
-fi
-
 mkdir -p "$ROOT/toolchains"
 if [[ ! -d "$SRC/.git" ]]; then
   git clone --depth 1 --branch "$TAG" https://github.com/llvm/llvm-project.git "$SRC"
+fi
+
+if compgen -G "$IOS/lib/libLLVM*.a" >/dev/null; then
+  echo "LLVM iOS: cached"
+  exit 0
 fi
 
 # Apple ld does not accept --gc-sections. Replace all occurrences of Darwin
