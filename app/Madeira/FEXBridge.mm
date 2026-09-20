@@ -76,8 +76,27 @@ static void fex_log(const char *fmt, ...) {
 // JIT Memory Pool
 // Dual-mapped: RX pages (from debugger) + RW pages (via vm_remap)
 // ---------------------------------------------------------------------------
-static constexpr size_t JIT_POOL_SIZE = 64 * 1024 * 1024; // 64MB
+static constexpr size_t JIT_POOL_SIZE_DEFAULT = 128 * 1024 * 1024; // 128MB default
 static constexpr size_t JIT_PAGE_SIZE = 0x4000; // 16KB iOS pages
+
+// Returns the JIT pool size to use.  Reads MADEIRA_JIT_POOL_MB at first call
+// so the user can tune it from the Settings UI without a rebuild.
+static size_t jit_pool_size_mb() {
+    static size_t cached = 0;
+    if (cached) return cached;
+    const char *env = getenv("MADEIRA_JIT_POOL_MB");
+    if (env && *env) {
+        long mb = strtol(env, nullptr, 10);
+        // Clamp to [32, 512] MB for safety.
+        if (mb < 32)  mb = 32;
+        if (mb > 512) mb = 512;
+        cached = (size_t)mb * 1024 * 1024;
+    } else {
+        cached = JIT_POOL_SIZE_DEFAULT;
+    }
+    fprintf(stderr, "[FEX] jit_pool_size = %zu MB\n", cached / (1024 * 1024));
+    return cached;
+}
 
 static void *g_jit_rx_base = nullptr;  // Executable view
 static void *g_jit_rw_base = nullptr;  // Writable view
@@ -119,7 +138,7 @@ static bool jit_pool_init(void) {
         return false;
     }
 
-    size_t size = JIT_POOL_SIZE;
+    size_t size = jit_pool_size_mb();
     mach_port_t task = mach_task_self();
 
     // Step 1: Ask debugger to allocate RX pages

@@ -1960,6 +1960,8 @@ struct ContentView: View {
                mb >= 256, mb <= 1152 {
                 poolSizeMB = mb
             }
+            // Publish to env so FEXBridge.mm::jit_pool_size_mb() uses the same value.
+            setenv("MADEIRA_JIT_POOL_MB", "\(poolSizeMB)", 1)
             logStore.log("Using JIT pool size: \(poolSizeMB)MB (Phone Optimization: \(phoneOptimization ? "ON" : "OFF"))", level: .info)
 
             // Phone Hardware Optimization: Clamp extra buffers on phones to keep total footprint low
