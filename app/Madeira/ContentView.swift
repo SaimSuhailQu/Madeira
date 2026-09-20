@@ -1486,7 +1486,6 @@ struct ContentView: View {
                     setenv("MADEIRA_DEAD_RELEASE", "0", 1)
                     setenv("MADEIRA_SRCWATCH", "off", 1)
                     setenv("MADEIRA_SRCWATCH_ROWS", "0,400", 1)
-                    setenv("MADEIRA_JITLESS", "1", 1)
                     runWineFullSequence()
                 }
                 .buttonStyle(.borderedProminent)
@@ -1513,7 +1512,7 @@ struct ContentView: View {
                     }
                     setenv("MADEIRA_EXE", "explorer.exe", 1)
                     setenv("MADEIRA_ARGS",
-                           "/desktop=shell,\(deskW)x\(deskH) C:\\windows\\system32\\services.exe", 1)
+                           "/desktop=shell,\(deskW)x\(deskH)", 1)
                     setenv("MADEIRA_DESKTOP", "1", 1)
                     setenv("MADEIRA_SCREEN_W", String(deskW), 1)
                     setenv("MADEIRA_SCREEN_H", String(deskH), 1)

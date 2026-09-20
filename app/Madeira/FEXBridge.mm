@@ -25,6 +25,7 @@
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <libkern/OSCacheControl.h>
 #include <os/log.h>
 #include <pthread.h>
@@ -446,28 +447,48 @@ bool fex_initialize(void) {
         return false;
     }
 
-    // Step 5: Create HostFeatures for Apple A15 (iPhone 13 Pro)
-    fex_log("  Creating HostFeatures...");
+    // Step 5: Create HostFeatures dynamically based on runtime device capabilities
+    // This ensures compatibility with iPhone XS (A12, ARMv8.3) up to iPhone 15 Pro (A17 Pro).
+    fex_log("  Creating HostFeatures (querying device capabilities)...");
+    auto check_hw_feature = [](const char *name) -> bool {
+        int val = 0;
+        size_t size = sizeof(val);
+        if (sysctlbyname(name, &val, &size, NULL, 0) == 0) {
+            return val != 0;
+        }
+        return false;
+    };
+
     FEXCore::HostFeatures Features{};
     Features.DCacheLineSize = 64;
     Features.ICacheLineSize = 64;
     Features.SupportsCacheMaintenanceOps = true;
     Features.SupportsAES = true;
     Features.SupportsCRC = true;
-    Features.SupportsAtomics = true;  // ARMv8.1 LSE
-    Features.SupportsRCPC = true;     // ARMv8.3 RCPC
-    Features.SupportsTSOImm9 = true;  // RCPC2
+    Features.SupportsAtomics = true;  // ARMv8.1 LSE (supported on A10+)
+    Features.SupportsRCPC = true;     // ARMv8.3 RCPC (supported on A12+)
+    // RCPC2 (TSOImm9 / ldapr), FlagM, FlagM2 require ARMv8.4+ / ARMv8.5+ (A13+)
+    // On iPhone XS (A12), enabling these triggers SIGILL when FEX emits unsupported opcodes.
+    Features.SupportsTSOImm9 = check_hw_feature("hw.optional.arm.FEAT_LRCPC2");
     Features.SupportsSHA = true;
     Features.SupportsPMULL_128Bit = true;
     Features.SupportsFCMA = true;
-    Features.SupportsFlagM = true;
-    Features.SupportsFlagM2 = true;
-    Features.SupportsAVX = false;     // No SVE on A15
+    Features.SupportsFlagM = check_hw_feature("hw.optional.arm.FEAT_FlagM");
+    Features.SupportsFlagM2 = check_hw_feature("hw.optional.arm.FEAT_FlagM2");
+    Features.SupportsAVX = false;
     Features.SupportsSVE128 = false;
     Features.SupportsSVE256 = false;
-    // A15 has 6 performance + 2 efficiency cores
-    Features.CPUMIDRs.resize(8, 0x611F0250); // A15 Firestorm MIDR (approximate)
 
+    // Determine number of CPU cores and set MIDRs
+    int ncpu = 6;
+    size_t ncpu_len = sizeof(ncpu);
+    if (sysctlbyname("hw.ncpu", &ncpu, &ncpu_len, NULL, 0) != 0 || ncpu <= 0) {
+        ncpu = 6;
+    }
+    Features.CPUMIDRs.resize(ncpu, 0x611F0250);
+
+    fex_log("  HostFeatures: TSOImm9=%d, FlagM=%d, FlagM2=%d, ncpu=%d",
+            Features.SupportsTSOImm9, Features.SupportsFlagM, Features.SupportsFlagM2, ncpu);
     fex_log("Creating FEXCore context...");
 
     // Step 6: Create context
