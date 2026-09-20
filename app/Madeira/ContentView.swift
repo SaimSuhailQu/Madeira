@@ -1204,7 +1204,11 @@ struct ContentView: View {
                 allowedContentTypes: [.item],
                 allowsMultipleSelection: false
             ) { result in
-                handleImportedFile(result)
+                // Delay execution to allow the file picker to dismiss before the JIT allocation
+                // BRK instruction suspends the entire process, which would otherwise freeze the UI.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    handleImportedFile(result)
+                }
             }
         }
     }
