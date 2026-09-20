@@ -930,7 +930,7 @@ static void *wine_process_thread(void *arg) {
         static char args_buf[1024];
         char *extra_argv[16] = {0};
         int extra_argc = 0;
-        const char *madeira_args = getenv("MADEIRA_ARGS");
+        madeira_args = getenv("MADEIRA_ARGS");
         if (madeira_args && *madeira_args) {
             strncpy(args_buf, madeira_args, sizeof(args_buf) - 1);
             args_buf[sizeof(args_buf) - 1] = 0;
