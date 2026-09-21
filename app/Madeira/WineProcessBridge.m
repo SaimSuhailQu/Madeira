@@ -43,6 +43,79 @@ static os_log_t wine_proc_log(void) {
 
 #define LOG(fmt, ...) os_log(wine_proc_log(), "[WineProc] " fmt, ##__VA_ARGS__)
 
+/* ---------------------------------------------------------------------------
+ * ml777: PE architecture detection (32-bit / WoW64 support)
+ *
+ * The old arch pick was "x64 in the filename". Real 32-bit games and
+ * Steam's steam.exe fail that heuristic, so session selection now reads the
+ * PE header of the target binary itself. Deliberately tiny: parse the DOS
+ * header for e_lfanew, validate the "PE\0\0" signature, read the 16-bit
+ * machine field. Only the first 4KB of the file is read, so even huge
+ * games cost one small pread at launch.
+ * ------------------------------------------------------------------------- */
+static uint16_t pe_u16(const unsigned char *p)
+{
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+static uint32_t pe_u32(const unsigned char *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+int madeira_pe_machine_from_unix_path(const char *unix_path, uint32_t *machine_out)
+{
+    if (!unix_path || !machine_out) return -1;
+
+    int fd = open(unix_path, O_RDONLY);
+    if (fd < 0) return -1;
+
+    unsigned char buf[4096];
+    ssize_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (n < 64) return -1;                      /* below DOS header minimum */
+
+    /* DOS: 'MZ' magic, then e_lfanew at offset 0x3C points at the PE header. */
+    if (buf[0] != 'M' || buf[1] != 'Z') return -1;
+    uint32_t lfanew = pe_u32(buf + 0x3C);
+    if (lfanew == 0 || lfanew > 0x1000 || lfanew + 6 > (uint32_t)n) return -1;
+
+    /* PE signature "PE\0\0", machine is the next 16-bit field. */
+    if (buf[lfanew] != 'P' || buf[lfanew + 1] != 'E' ||
+        buf[lfanew + 2] != 0   || buf[lfanew + 3] != 0) return -1;
+
+    *machine_out = pe_u16(buf + lfanew + 4);
+    return 0;
+}
+
+int madeira_pe_machine_from_win_path(const char *prefix_path,
+                                     const char *win_spec,
+                                     uint32_t *machine_out)
+{
+    if (!prefix_path || !win_spec || !machine_out) return -1;
+
+    char unix_path[1024];
+    if (strchr(win_spec, '\\') || (win_spec[0] && win_spec[1] == ':')) {
+        /* Full Windows path: "C:\dir\file.exe" → "<prefix>/drive_c/dir/file.exe" */
+        const char *after_drive = (win_spec[0] && win_spec[1] == ':') ? win_spec + 3 : win_spec;
+        int rc = snprintf(unix_path, sizeof(unix_path), "%s/drive_c/", prefix_path);
+        if (rc < 0 || (size_t)rc >= sizeof(unix_path)) return -1;
+        size_t used = (size_t)rc;
+        for (const char *p = after_drive; *p && used < sizeof(unix_path) - 1; p++)
+            unix_path[used++] = (*p == '\\') ? '/' : *p;
+        unix_path[used] = 0;
+    } else {
+        /* Bare name: resolves under C:\windows\system32, matching the
+         * launch-path construction further below. */
+        int rc = snprintf(unix_path, sizeof(unix_path), "%s/drive_c/windows/system32/%s",
+                          prefix_path, win_spec);
+        if (rc < 0 || (size_t)rc >= sizeof(unix_path)) return -1;
+    }
+    return madeira_pe_machine_from_unix_path(unix_path, machine_out);
+}
+
+
 /* ---- ml581: undo the hand-made AppData skeleton ------------------------
  *
  * While chasing the Steam login window I hand-created
@@ -694,22 +767,103 @@ static void *wine_process_thread(void *arg) {
         // Set MADEIRA_EXE=hello-x64.exe in env to launch the ARM64EC test path.
         const char *madeira_exe = getenv("MADEIRA_EXE");
         if (!madeira_exe || !*madeira_exe) madeira_exe = "cube.exe";
-        // Heuristic: x86_64 guest exes (cube-x64, hello-x64, real games like
-        // Thumper) need the arm64ec-windows bundle (ARM64EC hybrid system
-        // DLLs that interop with FEX-translated x86_64 code). ARM64-native
-        // tests (cube.exe) use the aarch64-windows bundle.
-        // MADEIRA_USE_ARM64EC=1 forces the arm64ec path explicitly.
-        // Otherwise: detect "x64" in the exe name (cube-x64, fib-x64, etc.)
-        // OR a Win32 full path (real game launches typically need ARM64EC).
+        // ml777 (32-bit/WoW64 support): session architecture is now read from
+        // the target PE header (IMAGE_FILE_MACHINE_*), replacing the old
+        // "x64 in the name" heuristic — real 32-bit games and Steam's
+        // steam.exe have no "x64" marker, and bare test exes need the
+        // aarch64 bundle. The heuristic is kept only as a fallback for
+        // targets whose header can't be read.
+        //
+        //   i386  → WoW64 session: i386-windows PE set (32-bit x86 games and
+        //           apps, including the real Steam client), executed through
+        //           the 32-bit FEX path. Requires the optional i386 PE set
+        //           built via MADEIRA_BUILD_I386=1 (see scripts/build/build-wine.sh);
+        //           if the set is missing the launch falls back to arm64ec
+        //           with a loud log instead of dying.
+        //   amd64 / ARM64EC → arm64ec-windows bundle (FEX x86_64 guest path).
+        //   ARM64 → aarch64-windows bundle.
+        //   unreadable → legacy heuristic.
+        // MADEIRA_USE_ARM64EC=1 still forces the arm64ec path explicitly.
         const char *force_ec = getenv("MADEIRA_USE_ARM64EC");
         const char *madeira_args = getenv("MADEIRA_ARGS");
-        BOOL use_arm64ec = (force_ec && *force_ec == '1') ||
-                           (strstr(madeira_exe, "x64") != NULL) ||
-                           (strchr(madeira_exe, '\\') != NULL) ||
-                           (madeira_args && (strstr(madeira_args, ".exe") != NULL || strstr(madeira_args, ".bat") != NULL));
-        const char *bundle_subdir = use_arm64ec ? "arm64ec-windows" : "aarch64-windows";
-        LOG("Target exe: %{public}s (bundle=%{public}s)", madeira_exe, bundle_subdir);
-        dprintf(STDERR_FILENO, "[WineProc] Target exe: %s (bundle=%s)\n", madeira_exe, bundle_subdir);
+        BOOL legacy_ec = (strstr(madeira_exe, "x64") != NULL) ||
+                         (strchr(madeira_exe, '\\') != NULL) ||
+                         (madeira_args && (strstr(madeira_args, ".exe") != NULL || strstr(madeira_args, ".bat") != NULL));
+
+        uint32_t pe_machine = 0;
+        int pe_rc = madeira_pe_machine_from_win_path(g_prefix_path, madeira_exe, &pe_machine);
+        BOOL use_arm64ec, use_i386 = NO;
+        // A composed launch (MADEIRA_ARGS names an .exe/.bat, e.g. the Steam
+        // desktop flow's "explorer.exe … cmd /c C:\steam-launch.bat") is NOT
+        // a plain exe launch: the named exe is just the session host, and its
+        // PE machine must not re-route the session. Those keep the proven
+        // arm64ec choice unless the host exe itself is 32-bit.
+        BOOL composed_args = (madeira_args && (strstr(madeira_args, ".exe") != NULL || strstr(madeira_args, ".bat") != NULL));
+        if (force_ec && *force_ec == '1') {
+            use_arm64ec = YES;
+        } else if (pe_rc == 0 && pe_machine == MADEIRA_PE_MACHINE_I386) {
+            /* 32-bit target: honor the header (this is the WoW64 case the
+             * filename heuristic could never see). */
+            use_i386 = YES; use_arm64ec = NO;
+        } else if (composed_args) {
+            /* Composed launch with a non-i386 host: preserve the legacy
+             * arm64ec desktop/session behaviour (Steam Testing et al). */
+            use_arm64ec = YES;
+        } else if (pe_rc == 0) {
+            switch (pe_machine) {
+                case MADEIRA_PE_MACHINE_AMD64:
+                case MADEIRA_PE_MACHINE_ARM64EC:   /* EC-capable: x64 guest path */
+                    use_arm64ec = YES;
+                    break;
+                case MADEIRA_PE_MACHINE_ARM64:
+                    use_arm64ec = NO;
+                    break;
+                default:
+                    /* Unknown machine: fall back to the heuristic. */
+                    use_arm64ec = legacy_ec;
+                    break;
+            }
+        } else {
+            use_arm64ec = legacy_ec;
+        }
+
+        // i386 session needs the optional i386-windows PE set in the bundle;
+        // degrade gracefully (log + arm64ec fallback) when it isn't shipped.
+        if (use_i386) {
+            NSString *bundlePath0 = [[NSBundle mainBundle] bundlePath];
+            NSString *i386Source0 = [bundlePath0 stringByAppendingPathComponent:@"i386-windows"];
+            BOOL i386_present = [[NSFileManager defaultManager] fileExistsAtPath:i386Source0];
+            if (!i386_present) {
+                LOG("Target %{public}s is 32-bit x86 but no i386-windows PE set is in the bundle — rebuild with MADEIRA_BUILD_I386=1 (scripts/build/build-wine.sh). Falling back to arm64ec session.", madeira_exe);
+                dprintf(STDERR_FILENO, "[WineProc] 32-bit target: i386-windows set MISSING, fallback to arm64ec session\n");
+                use_i386 = NO;
+                use_arm64ec = YES;
+            }
+        }
+
+        const char *bundle_subdir = use_i386 ? "i386-windows"
+                                  : (use_arm64ec ? "arm64ec-windows" : "aarch64-windows");
+
+        // Publish the resolved session architecture for the fork-side
+        // (ntdll/FEX) code: MADEIRA_PE_ARCH is informational, MADEIRA_WOW64=1
+        // arms the 32-bit WoW64 dispatch path for i386 sessions.
+        {
+            const char *pe_arch = use_i386 ? "i386"
+                                : use_arm64ec ? "amd64" : "aarch64";
+            setenv("MADEIRA_PE_ARCH", pe_arch, 1);
+            if (use_i386) {
+                setenv("MADEIRA_WOW64", "1", 1);
+                LOG("32-bit (WoW64) session: MADEIRA_WOW64=1 (PE machine=0x%x i386)", pe_machine);
+            } else {
+                unsetenv("MADEIRA_WOW64");
+            }
+        }
+
+        LOG("Target exe: %{public}s (bundle=%{public}s, PE machine=0x%x, probe=%s)",
+            madeira_exe, bundle_subdir, pe_machine,
+            pe_rc == 0 ? "header" : "heuristic");
+        dprintf(STDERR_FILENO, "[WineProc] Target exe: %s (bundle=%s, PE machine=0x%x, probe=%s)\n",
+                madeira_exe, bundle_subdir, pe_machine, pe_rc == 0 ? "header" : "heuristic");
 
         // Ensure Wine prefix has system32 directory with DLLs from bundle
         {
@@ -741,7 +895,10 @@ static void *wine_process_thread(void *arg) {
             // session's set above and are skipped here; children load their
             // system DLLs arch-correctly via WINEDLLPATH + pe_dir probing.
             {
-                const char *other_subdir = use_arm64ec ? "aarch64-windows" : "arm64ec-windows";
+                /* ml777: in an i386 (WoW64) session the host side is the
+                 * arm64ec set, so cross-arch children resolve against it. */
+                const char *other_subdir = use_i386 ? "arm64ec-windows"
+                                         : (use_arm64ec ? "aarch64-windows" : "arm64ec-windows");
                 NSString *otherSource = [bundlePath stringByAppendingPathComponent:[NSString stringWithUTF8String:other_subdir]];
                 NSArray *others = [fm contentsOfDirectoryAtPath:otherSource error:nil];
                 int crossLinked = 0;
@@ -773,16 +930,28 @@ static void *wine_process_thread(void *arg) {
             // names (ucrtbase, kernel32, ...) always do. sysaa64 is the
             // mirror for the future inverse case (aarch64 child in an EC
             // session, e.g. rpcss under Steam).
+            // ml777: sysx86 adds the i386 (WoW64) farm for 32-bit games and
+            // apps; syswow64 additionally carries the same set under its
+            // canonical name because vanilla Wine's loader probes
+            // <windows>/syswow64 for i386 modules directly. Farms whose
+            // bundle arch set is absent (e.g. i386 not built) are skipped.
             {
                 struct { const char *farm; const char *arch; } farms[] = {
-                    { "sysx64",  "arm64ec-windows" },
-                    { "sysaa64", "aarch64-windows" },
+                    { "sysx64",   "arm64ec-windows" },
+                    { "sysaa64",  "aarch64-windows" },
+                    { "sysx86",   "i386-windows" },
+                    { "syswow64", "i386-windows" },
                 };
-                for (int i = 0; i < 2; i++) {
-                    NSString *farmDir = [prefix stringByAppendingPathComponent:
-                        [NSString stringWithFormat:@"drive_c/windows/%s", farms[i].farm]];
+                for (int i = 0; i < 4; i++) {
                     NSString *archSource = [bundlePath stringByAppendingPathComponent:
                         [NSString stringWithUTF8String:farms[i].arch]];
+                    if (![fm fileExistsAtPath:archSource]) {
+                        dprintf(STDERR_FILENO, "[WineProc] Farm %s: skipped (%s not in bundle)\n",
+                                farms[i].farm, farms[i].arch);
+                        continue;
+                    }
+                    NSString *farmDir = [prefix stringByAppendingPathComponent:
+                        [NSString stringWithFormat:@"drive_c/windows/%s", farms[i].farm]];
                     [fm createDirectoryAtPath:farmDir withIntermediateDirectories:YES attributes:nil error:nil];
                     NSArray *files = [fm contentsOfDirectoryAtPath:archSource error:nil];
                     int farmLinked = 0;

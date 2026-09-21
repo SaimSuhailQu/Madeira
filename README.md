@@ -15,6 +15,17 @@ controls are not yet reliable. Others reach gameplay at low frame rates. This
 is a research project, not a product: expect rough edges, per-title quirks and
 breaking changes.
 
+**32-bit (WoW64) games & apps:** launches now detect the target's PE
+architecture and run 32-bit x86 binaries through an i386 (WoW64) session
+when the optional `i386-windows` PE set is built into the bundle
+(`MADEIRA_BUILD_I386=1 ./scripts/build/build-wine.sh`; see
+[BUILDING.md](BUILDING.md)). Without it, 32-bit launches degrade with a
+clear log instead of crashing. **Steam:** the launch path probes
+`steam.exe`'s PE header — the real 32-bit Steam client is accepted when
+WoW64 support is present, 64-bit archives run as before, and 4 GB-class
+devices (iPhone XS/XR/11) get an automatic JIT-pool clamp plus a pre-run
+memory briefing to avoid the iOS jetsam "app closes to home screen" kill.
+
 ## Requirements
 
 ## Auto-Updates (SideStore / AltStore / LiveContainer Source)

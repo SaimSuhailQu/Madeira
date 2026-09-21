@@ -1009,6 +1009,7 @@ struct PhoneSettingsSheet: View {
     @Binding var selectedRes: String
     @Binding var jitPoolMB: Int
     @Binding var phoneOptimization: Bool
+    @Binding var wow64Support: Bool
     @Environment(\.dismiss) private var dismiss
 
     let resOptions = [
@@ -1030,6 +1031,12 @@ struct PhoneSettingsSheet: View {
         ("1024 MB (Maximum - Pro/iPad Devices Only)", 1024)
     ]
 
+    /// ml777: whether this bundle ships the optional i386 (WoW64) PE set.
+    private var i386SetPresent: Bool {
+        FileManager.default.fileExists(
+            atPath: Bundle.main.bundlePath + "/i386-windows")
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -1037,6 +1044,18 @@ struct PhoneSettingsSheet: View {
                         footer: Text("Optimizes memory and background buffers to avoid iOS Jetsam crash-to-home-screen on phones with 4GB RAM.")) {
                     Toggle("Phone Hardware Optimization", isOn: $phoneOptimization)
                         .tint(.green)
+                }
+
+                // ml777: 32-bit (WoW64) games & apps, including the real
+                // 32-bit Steam client. Gated on the optional i386-windows PE
+                // set: when the bundle lacks it, the toggle still shows but
+                // the footer explains what to build.
+                Section(header: Text("32-bit Games & Apps"),
+                        footer: Text(i386SetPresent
+                            ? "Run 32-bit x86 games, apps and the real Steam client through the WoW64 session (MADEIRA_WOW64=1)."
+                            : "Requires the i386-windows PE set, which is not in this build. Rebuild the IPA with MADEIRA_BUILD_I386=1 (see BUILDING.md). Until then, 32-bit launches fall back with a log and Steam needs a 64-bit archive.")) {
+                    Toggle("32-bit Support (WoW64)", isOn: $wow64Support)
+                        .tint(.blue)
                 }
 
                 Section(header: Text("JIT Pool Size"),
@@ -1106,6 +1125,10 @@ struct ContentView: View {
     @AppStorage("wine_desktop_res") private var selectedResolution: String = "960x540"
     @AppStorage("jit_pool_mb") private var jitPoolMB: Int = 384 // Default to 384MB for phone memory safety
     @AppStorage("phone_optimization") private var phoneOptimization: Bool = true
+    /// ml777: 32-bit (WoW64) games & apps. Launches of i386 PEs run through
+    /// the WoW64 session when the optional i386-windows PE set is present in
+    /// the bundle; otherwise they fall back with a clear log (never a crash).
+    @AppStorage("wow64_support") private var wow64Support: Bool = true
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
     @Environment(\.verticalSizeClass) private var vSizeClass
 
@@ -1172,7 +1195,8 @@ struct ContentView: View {
                 PhoneSettingsSheet(
                     selectedRes: $selectedResolution,
                     jitPoolMB: $jitPoolMB,
-                    phoneOptimization: $phoneOptimization
+                    phoneOptimization: $phoneOptimization,
+                    wow64Support: $wow64Support
                 )
             }
             .alert("JIT Not Enabled", isPresented: $showJITAlert) {
@@ -1963,6 +1987,17 @@ struct ContentView: View {
                mb >= 256, mb <= 1152 {
                 poolSizeMB = mb
             }
+            // ml777: 4GB-class devices (iPhone XS / XR / 11) jetsam far below
+            // the 6-8GB budgets the 512-1024MB Steam/CEF pool sizes were
+            // tuned against. Auto-clamp here so a stale madeira-pool.txt or
+            // an inherited setting can't kill the app on launch — the
+            // "closes the application" symptom on XS-class phones. A manual
+            // override below 384MB (256) still wins.
+            let deviceRAMGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0 * 1024.0)
+            if deviceRAMGB < 4.6 && poolSizeMB > 384 {
+                logStore.log("Device RAM ≈ \(Int(deviceRAMGB.rounded()))GB: JIT pool \(poolSizeMB)MB → 384MB (jetsam safety on 4GB devices)", level: .info)
+                poolSizeMB = 384
+            }
             // Publish to env so FEXBridge.mm::jit_pool_size_mb() uses the same value.
             setenv("MADEIRA_JIT_POOL_MB", "\(poolSizeMB)", 1)
             logStore.log("Using JIT pool size: \(poolSizeMB)MB (Phone Optimization: \(phoneOptimization ? "ON" : "OFF"))", level: .info)
@@ -2405,10 +2440,51 @@ struct ContentView: View {
         guard let winDir = winDirFound else {
             logStore.log("Steam is not installed in this prefix.", level: .error)
             logStore.log("  Searched: Program Files (x86)\\Steam and Program Files\\Steam", level: .info)
-            logStore.log("  Valve's SteamSetup.exe cannot be used to install it here: the", level: .info)
-            logStore.log("  installer AND the Steam.exe it lays down are 32-bit x86, and this", level: .info)
-            logStore.log("  build runs x86-64 only (ARM64EC + FEX, no 32-bit emulator).", level: .info)
-            logStore.log("  Tip: Tap 'Install / Run EXE' and select a 64-bit Steam .tar.gz archive or folder.", level: .info)
+            logStore.log("  You can install it via 'Install / Run EXE' with SteamSetup.exe — 32-bit", level: .info)
+            logStore.log("  steam.exe is supported when the build includes 32-bit (WoW64) support", level: .info)
+            logStore.log("  (i386-windows PE set; see BUILDING.md), or use a 64-bit Steam archive.", level: .info)
+            return false
+        }
+
+        // ml777: read the PE machine type of the steam.exe we're about to run.
+        // Real Steam is 32-bit x86 (no "x64" in the name — the old heuristic
+        // could never see it); 64-bit archives carry an x86-64 steam.exe.
+        let steamWinExe = "\(winDir)\\steam.exe"
+        var peMachine: UInt32 = 0
+        let peRC = steamWinExe.withCString { cWin in
+            prefix.withCString { cPrefix in
+                madeira_pe_machine_from_win_path(cPrefix, cWin, &peMachine)
+            }
+        }
+        var steamIs32Bit = false
+        if peRC == 0 {
+            steamIs32Bit = (peMachine == 0x014c) /* IMAGE_FILE_MACHINE_I386 */
+            logStore.log("steam.exe PE machine: 0x\(String(peMachine, radix: 16)) (\(steamIs32Bit ? "32-bit x86" : "64-bit/ARM64"))", level: .info)
+        } else {
+            logStore.log("steam.exe PE header unreadable — launching with session defaults.", level: .info)
+        }
+
+        if steamIs32Bit && wow64Support {
+            // 32-bit Steam needs the optional i386 (WoW64) PE set in the bundle.
+            if !fm.fileExists(atPath: "\(Bundle.main.bundlePath)/i386-windows") {
+                logStore.log("This steam.exe is 32-bit x86, but this build has no 32-bit (WoW64) support installed.", level: .error)
+                logStore.log("  The i386-windows PE set is missing from the bundle. Rebuild the IPA with", level: .info)
+                logStore.log("  MADEIRA_BUILD_I386=1 (see BUILDING.md → '32-bit (WoW64) support').", level: .info)
+                logStore.log("  Tip: a 64-bit Steam archive (x86-64 steam.exe) runs without it.", level: .info)
+                return false
+            }
+            logStore.log("32-bit Steam detected: WoW64 session will be used (MADEIRA_WOW64=1).", level: .success)
+            // XS-class devices: Steam+CEF runs near the jetsam ceiling there.
+            // Say so before the app is killed instead of the user guessing.
+            let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0 * 1024.0)
+            if ramGB < 4.6 {
+                logStore.log("Device has ~\(Int(ramGB.rounded()))GB RAM: Steam runs near the jetsam ceiling on this device.", level: .info)
+                logStore.log("  If the app closes to the home screen mid-run: set JIT Pool Size to 256MB in", level: .info)
+                logStore.log("  Phone & Display Settings and keep Phone Optimization ON.", level: .info)
+            }
+        } else if steamIs32Bit {
+            logStore.log("This steam.exe is 32-bit x86 but 32-bit (WoW64) support is disabled in Phone & Display Settings.", level: .error)
+            logStore.log("  Enable '32-bit Games & Apps (WoW64)' or use a 64-bit Steam archive.", level: .info)
             return false
         }
 

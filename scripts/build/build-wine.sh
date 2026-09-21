@@ -85,3 +85,58 @@ if [[ ! -f "$WINE/build-arm64ec/include/dwrite.h" || ! -f "$WINE/build-arm64ec/i
 else
   echo "Wine ARM64EC headers: cached"
 fi
+
+# ---------------------------------------------------------------------------
+# ml777: OPTIONAL 32-bit (WoW64) PE set — i386 games, apps and the real
+# 32-bit Steam client.
+#
+# The app detects a target's PE machine type at launch (WineProcessBridge.m
+# madeira_pe_machine_*) and runs an i386 session (MADEIRA_WOW64=1) with the
+# 32-bit set from app/Madeira/i386-windows when it is present.
+#
+# This build is OFF by default: it needs the FEX fork's 32-bit (x86) engine
+# for actual execution, so building it alone produces a bundle that degrades
+# gracefully (clear log, arm64ec fallback) rather than a working WoW64 path.
+# Opt in explicitly with:
+#
+#   MADEIRA_BUILD_I386=1 ./scripts/build/build-wine.sh
+#
+# The set is built the same way the ARM64EC PEs are: a dedicated Wine build
+# tree configured for the i386 PE arch, driven by the llvm-mingw toolchain
+# (llvm-mingw ships the i386-w64-mingw32 target), then stripped and collected
+# into app/Madeira/i386-windows for package-ipa.sh to bundle.
+# ---------------------------------------------------------------------------
+I386_DIR="$WINE/build-i386"
+I386_OUT="$ROOT/app/Madeira/i386-windows"
+if [[ "${MADEIRA_BUILD_I386:-0}" == "1" ]]; then
+  if [[ ! -f "$I386_DIR/Makefile" ]]; then
+    echo "Configuring Wine (i386 PE set for WoW64)..."
+    mkdir -p "$I386_DIR"
+    (
+      cd "$I386_DIR"
+      ../configure --enable-archs=i386 --disable-tests
+    )
+  fi
+  echo "Building Wine i386 PE set (this is a full PE build; expect a long run)..."
+  make -C "$I386_DIR" -j"$JOBS" dlls programs
+  mkdir -p "$I386_OUT"
+  count=0
+  while IFS= read -r pe; do
+    base="$(basename "$pe")"
+    # Only ship built PE images: skip import libs (.a), fake DLLs (.fake)
+    # and any cross-compiled static artifacts.
+    case "$base" in
+      *.dll|*.exe) ;;
+      *) continue ;;
+    esac
+    llvm-strip --strip-debug "$pe" 2>/dev/null || true
+    cp -f "$pe" "$I386_OUT/$base"
+    count=$((count + 1))
+  done < <(find "$I386_DIR/dlls" "$I386_DIR/programs" -type f \( -name '*.dll' -o -name '*.exe' \) 2>/dev/null)
+  echo "i386-windows: collected $count PE images into $I386_OUT"
+  [[ -f "$I386_OUT/ntdll.dll" ]] || {
+    echo "WARNING: i386 set collected but ntdll.dll is missing — WoW64 will not initialise" >&2
+  }
+else
+  echo "Wine i386 (WoW64) PE set: skipped (MADEIRA_BUILD_I386=1 to build)"
+fi

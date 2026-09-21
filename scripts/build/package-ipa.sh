@@ -45,6 +45,14 @@ xcodebuild \
 
 [[ -d "$APP" ]] || { echo "ERROR: xcodebuild succeeded but Madeira.app is missing" >&2; exit 1; }
 
+# ml777: ship the optional 32-bit (WoW64) PE set when it was built into the
+# source tree. Not an Xcode resource (the folder is optional, and Xcode fails
+# a folder reference that doesn't exist), so it's copied here, post-build.
+if [[ -d "$ROOT/app/Madeira/i386-windows" ]]; then
+  echo "Bundling optional i386-windows (WoW64) PE set..."
+  ditto "$ROOT/app/Madeira/i386-windows" "$APP/i386-windows"
+fi
+
 # Preserve Madeira's requested JIT/debug entitlements in the IPA. SideStore will
 # replace this ad-hoc signature with the user's development signature while
 # retaining the supported entitlements.
