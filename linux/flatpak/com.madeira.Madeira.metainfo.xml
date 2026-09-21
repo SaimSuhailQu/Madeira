@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.madeira.Madeira</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Madeira</name>
+  <summary>Run Windows PC games under a bundled Wine runtime</summary>
+  <developer_name>Madeira Team</developer_name>
+
+  <description>
+    <p>
+      Madeira launches Windows x86-64 PC games using a fully self-contained
+      Wine runtime. It bundles Wine, DXVK, VKD3D-Proton and (on ARM64 hosts)
+      FEX-Emu translation, so users never install system Wine or 32-bit
+      multilib libraries. The game runs in a private Wine prefix unde
+      XDG data paths; the default ~/.wine prefix is never touched.
+    </p>
+    <p>
+      Graphics fall back automatically from DXVK/VKD3D (Vulkan) to WineD3D
+      (OpenGL) on systems without Vulkan-capable drivers. The wrapper cleans
+      up wineserver and all game processes on exit — including after crashes
+      — and restores the desktop resolution.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.madeira.Madeira.desktop</launchable>
+
+  <provides>
+    <binary>madeira</binary>
+  </provides>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-09-19">
+      <description>
+        <p>First production Linux packaging: bundled Wine WoW64 runtime,
+        DXVK/VKD3D with WineD3D fallback, XDG prefix isolation, X11/Wayland
+        handling, robust teardown, and diagnostics mode.</p>
+      </description>
+    </release>
+  </releases>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>gamepad</control>
+  </recommends>
+
+  <requires>
+    <display_length compare="ge">800</display_length>
+  </requires>
+
+  <url type="homepage">https://github.com/SaimSuhailQu/Madeira</url>
+  <url type="bugtracker">https://github.com/SaimSuhailQu/Madeira/issues</url>
+
+  <keywords>
+    <keyword>wine</keyword>
+    <keyword>windows</keyword>
+    <keyword>games</keyword>
+    <keyword>emulation</keyword>
+  </keywords>
+</component>

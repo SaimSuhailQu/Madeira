@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+# Madeira — Linux entrypoint / launch wrapper.
+#
+# Production launcher for the bundled-Wine runtime produced by
+# linux/build-runtime.sh and packaged by linux/appimage/build-appimage.sh or
+# linux/flatpak/build-flatpak.sh.
+#
+# Responsibilities (design notes: linux/BLUEPRINT.md §2):
+#   * architecture check (x86_64 WoW64 / aarch64 + FEX) + PE-header probe
+#   * renderer: DXVK/VKD3D on Vulkan-capable GPUs, auto-fallback WineD3D/OpenGL
+#   * X11 / XWayland / opt-in native Wayland, DPI scaling fix,
+#     desktop-resolution + gamma snapshot & restore on exit
+#   * audio backend probe (PipeWire → PulseAudio → ALSA) + latency flags
+#   * isolated WINEPREFIX under XDG data paths — ~/.wine is never touched
+#   * clean process-tree teardown on exit/crash/signal (PGID + wineserver -k)
+#   * low-footprint env (WINEDEBUG=-all, fsync/esync, XDG-cached shader state)
+#   * --doctor diagnostics report and --debug verbose logging
+set -u -o pipefail
+
+MADEIRA_VERSION="1.0.0"
+
+# ------------------------------------------------------------- CLI parsing ---
+MADEIRA_DEBUG="${MADEIRA_DEBUG:-0}"
+MADEIRA_DOCTOR=0
+MADEIRA_HELP=0
+MADEIRA_PRINT_VERSION=0
+MADEIRA_RENDERER="${MADEIRA_RENDERER:-auto}"
+MADEIRA_PRESET="${MADEIRA_PRESET:-default}"
+MADEIRA_PREFIX_OPT="${MADEIRA_PREFIX:-}"
+MADEIRA_VDESKTOP="${MADEIRA_VIRTUAL_DESKTOP:-}"
+MADEIRA_EXTRA_ENV=()
+GAME_PATH=""
+GAME_ARGS=()
+GAME_DIR=""
+
+usage() {
+    cat <<'USAGE'
+Madeira — run Windows PC games with the bundled Wine runtime.
+
+Usage: madeira [OPTIONS] [--] [GAME.EXE [GAME-ARGS...]]
+
+Options:
+  --doctor                Write a diagnostics report to the log dir and exit.
+  --debug                 Verbose Wine/DXVK logging (tee'd to the log dir).
+  --renderer=MODE         auto | dxvk | wined3d      (default: auto)
+  --preset=PRESET         default | low              (low: older/weak hardware)
+  --prefix=PATH           Custom WINEPREFIX (default: XDG data dir /madeira/prefix)
+  --virtual-desktop=WxH   Run inside a Wine virtual desktop ('1' = auto-size)
+  --env=KEY=VAL           Export an extra variable into the game environment
+  --version, --help
+
+Environment (parity with the iOS host contract, WineProcessBridge.m):
+  MADEIRA_EXE / MADEIRA_ARGS   game + space-tokenized args (no positional given)
+  MADEIRA_RENDERER / MADEIRA_PRESET / MADEIRA_PREFIX / MADEIRA_VIRTUAL_DESKTOP
+  MADEIRA_ENABLE_WAYLAND=1     opt in to the native Wayland driver
+  MADEIRA_MAX_FPS=N            DXVK frame-rate cap
+  MADEIRA_AUDIO_LATENCY_MS=N   PULSE_LATENCY_MSEC (default 60)
+  MADEIRA_PIPEWIRE_LATENCY=Q/R PipeWire quantum (default 128/48000)
+  MADEIRA_SCALE=F              override desktop scale factor
+  MADEIRA_RESTORE_RESOLUTION=0 keep desktop mode changes after exit
+  MADEIRA_DEBUG=1              same as --debug
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --debug)              MADEIRA_DEBUG=1 ;;
+        --doctor)             MADEIRA_DOCTOR=1 ;;
+        --help|-h)            MADEIRA_HELP=1 ;;
+        --version|-V)         MADEIRA_PRINT_VERSION=1 ;;
+        --renderer=*)         MADEIRA_RENDERER="${1#*=}" ;;
+        --renderer)           [ $# -ge 2 ] && { MADEIRA_RENDERER="$2"; shift; } ;;
+        --preset=*)           MADEIRA_PRESET="${1#*=}" ;;
+        --preset)             [ $# -ge 2 ] && { MADEIRA_PRESET="$2"; shift; } ;;
+        --prefix=*)           MADEIRA_PREFIX_OPT="${1#*=}" ;;
+        --prefix)             [ $# -ge 2 ] && { MADEIRA_PREFIX_OPT="$2"; shift; } ;;
+        --virtual-desktop=*)  MADEIRA_VDESKTOP="${1#*=}" ;;
+        --virtual-desktop)    [ $# -ge 2 ] && { MADEIRA_VDESKTOP="$2"; shift; } ;;
+        --env=*)              MADEIRA_EXTRA_ENV+=("${1#*=}") ;;
+        --env)                [ $# -ge 2 ] && { MADEIRA_EXTRA_ENV+=("$2"); shift; } ;;
+        --)                   shift; break ;;
+        -*)                   printf 'madeira: unknown option: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
+        *)                    break ;;
+    esac
+    shift
+done
+# Remaining positionals: game path and its arguments.
+if [ $# -gt 0 ]; then
+    GAME_PATH="$1"
+    shift
+    if [ $# -gt 0 ]; then
+        # shellcheck disable=SC2206
+        GAME_ARGS=("$@")
+    fi
+fi
+# iOS host contract fallback: MADEIRA_EXE / MADEIRA_ARGS (space-tokenized).
+if [ -z "$GAME_PATH" ] && [ -n "${MADEIRA_EXE:-}" ]; then
+    GAME_PATH="$MADEIRA_EXE"
+    if [ -n "${MADEIRA_ARGS:-}" ]; then
+        # shellcheck disable=SC2206
+        GAME_ARGS=($MADEIRA_ARGS)
+    fi
+fi
+
+# ------------------------------------------------- bundle root resolution ----
+# APPDIR (AppImage runtime)  >  /app (Flatpak)  >  parent of this script
+# (dev checkout linux/app/madeira → linux/, and tarball layout where the
+# launcher lives at <root>/bin/madeira).
+MADEIRA_APPDIR="${APPDIR:-}"
+if [ -n "$MADEIRA_APPDIR" ] && [ -d "$MADEIRA_APPDIR" ]; then
+    MADEIRA_ROOT="$MADEIRA_APPDIR"
+elif [ -n "${FLATPAK_ID:-}" ] && [ -d /app/bin ]; then
+    MADEIRA_ROOT="/app"
+else
+    SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+    SELF_DIR="$(dirname "$SELF")"
+    case "$SELF_DIR" in
+        */AppDir)    MADEIRA_ROOT="$SELF_DIR" ;;
+        */app|*/bin) MADEIRA_ROOT="$(dirname "$SELF_DIR")" ;;
+        *)           MADEIRA_ROOT="$(dirname "$SELF_DIR")" ;;
+    esac
+fi
+[ -n "${MADEIRA_BUNDLE_ROOT:-}" ] && MADEIRA_ROOT="$MADEIRA_BUNDLE_ROOT"
+
+# AppImage convention: runtime payload lives in $APPDIR/files — descend if so.
+if [ ! -f "$MADEIRA_ROOT/lib/common.sh" ] && [ -f "$MADEIRA_ROOT/files/lib/common.sh" ]; then
+    MADEIRA_ROOT="$MADEIRA_ROOT/files"
+fi
+
+for _lib in common detect prefix doctor; do
+    _libfile="$MADEIRA_ROOT/lib/$_lib.sh"
+    if [ ! -f "$_libfile" ]; then
+        printf 'madeira: missing library %s\n' "$_libfile" >&2
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    . "$_libfile"
+done
+unset _lib _libfile
+
+[ "$MADEIRA_HELP" = "1" ]          && { usage; exit 0; }
+[ "$MADEIRA_PRINT_VERSION" = "1" ] && { printf 'madeira %s (lib %s)\n' "$MADEIRA_VERSION" "$MADEIRA_LIB_VERSION"; exit 0; }
+# --------------------------------------------------- environment hardening ---
+# All Wine/game environment tuning lives here so it is auditable in one place.
+setup_wine_env() {
+    WINEPREFIX="$(madeira_prefix_dir)"
+    export WINEPREFIX
+    log_dbg "WINEPREFIX=$WINEPREFIX"
+
+    # -- Wine debug spam: off. (--debug re-enables the useful channels.)
+    export WINEDEBUG="-all"
+    if [ "$MADEIRA_DEBUG" = "1" ]; then
+        export WINEDEBUG="warn+seh,+loaddll"
+        export DXVK_LOG_LEVEL="info"
+        export DXVK_LOG_PATH="$(madeira_logs_dir)"
+        export VKD3D_DEBUG="warn"
+    fi
+
+    # -- Renderer DLL overrides (';' separates entries, ',' orders fallbacks).
+    if [ "$MADEIRA_USE_DXVK" = "1" ]; then
+        export WINEDLLOVERRIDES="d3d9=n,b;d3d10core=n,b;d3d11=n,b;dxgi=n,b;mscoree=d;mshtml=d"
+        [ "$MADEIRA_USE_VKD3D" = "1" ] && \
+            export WINEDLLOVERRIDES="$WINEDLLOVERRIDES;d3d12=n,b"
+    else
+        export WINEDLLOVERRIDES="mscoree=d;mshtml=d"
+    fi
+
+    # -- Synchronization primitives (kernel-version gated by detect_*).
+    if [ "${MADEIRA_NTSYNC:-0}" = "1" ] && [ "${MADEIRA_DISABLE_NTSYNC:-0}" != "1" ]; then
+        export WINE_NTSYNC=1            # Wine ≥ 9.9/fork with ntsync drive
+    elif [ "${MADEIRA_FUTEX2:-0}" = "1" ]; then
+        export WINEFSYNC=1              # futex2 fsync (kernel ≥ 5.16)
+    elif [ "${MADEIRA_ESYNC:-0}" = "1" ]; then
+        export WINEESYNC=1
+        local hn
+        hn="$(ulimit -Hn 2>/dev/null || echo 0)"
+        [ "$hn" -lt 65536 ] 2>/dev/null && \
+            log_warn "esync wants a higher fd limit (ulimit -Hn $hn < 65536)"
+    fi
+
+    # -- Audio: PipeWire is reached through its PulseAudio compat API, so the
+    #    Pulse driver + latency flags cover both backends.
+    export PULSE_LATENCY_MSEC="${MADEIRA_AUDIO_LATENCY_MS:-60}"
+    export PIPEWIRE_LATENCY="${MADEIRA_PIPEWIRE_LATENCY:-128/48000}"
+    case "$MADEIRA_AUDIO_BACKEND" in
+        pipewire|pulseaudio) : ;;
+        alsa)     log_dbg "audio: ALSA directly (no pulse/pipewire session)" ;;
+        none)     log_warn "no audio backend detected — game will run silent" ;;
+    esac
+
+    # -- Shader/compilation caches → XDG cache, keeping the prefix small.
+    local cache
+    cache="$(madeira_cache_dir)"
+    mkdir -p "$cache/dxvk" "$cache/vkd3d" "$cache/gl" 2>/dev/null || true
+    export DXVK_STATE_CACHE_PATH="$cache/dxvk"
+    export VKD3D_SHADER_CACHE_PATH="$cache/vkd3d"
+    export __GL_SHADER_DISK_CACHE_PATH="$cache/gl"
+    export __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
+    # Per-game dxvk.conf placed next to the exe wins over everything.
+    if [ -n "$GAME_PATH" ] && [ -f "$GAME_DIR/dxvk.conf" ]; then
+        export DXVK_CONFIG_FILE="$GAME_DIR/dxvk.conf"
+    fi
+
+    # -- Vendor specifics.
+    case "$MADEIRA_GPU_VENDOR" in
+        nvidia)
+            # NVAPI exposure fixes title detection/features on many games.
+            export DXVK_ENABLE_NVAPI=1
+            ;;
+        *) : ;;
+    esac
+
+    # -- Software GL escape hatch (no GPU at all).
+    if [ "${MADEIRA_SOFTWARE_GL:-0}" = "1" ]; then
+        export LIBGL_ALWAYS_SOFTWARE=1
+        export GALLIUM_DRIVER=llvmpipe
+        log_warn "software rendering forced (llvmpipe) — expect low FPS"
+    fi
+
+    # -- Preset: low-end / older hardware.
+    if [ "$MADEIRA_PRESET" = "low" ]; then
+        export PULSE_LATENCY_MSEC="${MADEIRA_AUDIO_LATENCY_MS:-90}"
+        export PIPEWIRE_LATENCY="${MADEIRA_PIPEWIRE_LATENCY:-1024/48000}"
+        export MALLOC_ARENA_MAX=2
+        [ -n "${MADEIRA_MAX_FPS:-}" ] && export DXVK_FRAME_RATE="$MADEIRA_MAX_FPS"
+        [ "$MADEIRA_USE_DXVK" != "1" ] && export vblank_mode=0   # Mesa GL: unlock fps (may tear)
+    elif [ -n "${MADEIRA_MAX_FPS:-}" ]; then
+        export DXVK_FRAME_RATE="$MADEIRA_MAX_FPS"
+    fi
+
+    # -- User-supplied extras (--env=KEY=VAL), last so they can override above.
+    local kv
+    for kv in ${MADEIRA_EXTRA_ENV[@]+"${MADEIRA_EXTRA_ENV[@]}"}; do
+        case "$kv" in
+            *=*) export "$kv" ;;
+            *)   log_warn "ignoring malformed --env entry: $kv" ;;
+        esac
+    done
+}
+# -------------------------------------------------------------- teardown -----
+# Order matters (see BLUEPRINT.md §2.5):
+#   1. SIGTERM the game's process group (children of wineserver inherit it)
+#   2. wineserver -k for the exact prefix (polite cleanup of services)
+#   3. hard sweep: wineserver processes whose *cwd* is our prefix, and any
+#      process still referencing <prefix>/drive_c
+#   4. restore desktop resolution / gamma (X11)
+kill_pgid() { kill "-$2" -- "-$1" 2>/dev/null || true; }
+pgid_alive() { kill -0 -- "-$1" 2>/dev/null; }
+
+madeira_teardown() {
+    [ "${MADEIRA_TEARDOWN_DONE:-0}" = "1" ] && return 0
+    MADEIRA_TEARDOWN_DONE=1
+    local status="${1:-$?}"
+
+    log_info "shutting down (exit status $status)"
+
+    # 1) game process group: TERM → 10s grace → KILL
+    if [ -n "${GAME_PID:-}" ]; then
+        local pgid i
+        pgid="$(ps -o pgid= -p "$GAME_PID" 2>/dev/null | tr -d ' ')"
+        [ -n "$pgid" ] || pgid="$GAME_PID"
+        if pgid_alive "$pgid"; then
+            log_dbg "SIGTERM → process group $pgid"
+            kill_pgid "$pgid" TERM
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
+                     21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 \
+                     41 42 43 44 45 46 47 48 49 50; do
+                pgid_alive "$pgid" || break
+                sleep 0.2
+            done
+            if pgid_alive "$pgid"; then
+                log_warn "process group $pgid survived SIGTERM — sending SIGKILL"
+                kill_pgid "$pgid" KILL
+            fi
+        fi
+    fi
+
+    # 2) polite wineserver shutdown scoped to this prefix
+    if [ -n "${MADEIRA_WINESERVER:-}" ] && [ -x "$MADEIRA_WINESERVER" ]; then
+        WINEDEBUG="-all" "$MADEIRA_WINESERVER" -k >/dev/null 2>&1 || true
+    fi
+
+    # 3) hard sweep — precise, not global: only processes rooted in OUR prefix
+    if require_cmd pgrep; then
+        local pid cwd killed=0
+        for pid in $(pgrep -x wineserver 2>/dev/null); do
+            cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || continue
+            if [ "$cwd" = "${WINEPREFIX:-}" ] && [ -n "$WINEPREFIX" ]; then
+                log_warn "SIGKILL lingering wineserver (pid $pid — cwd matches prefix)"
+                kill -KILL "$pid" 2>/dev/null || true
+                killed=1
+            fi
+        done
+        for pid in $(pgrep -f "$WINEPREFIX/drive_c" 2>/dev/null); do
+            [ "$pid" = "$$" ] && continue
+            kill -KILL "$pid" 2>/dev/null || true
+            killed=1
+        done
+        [ "$killed" = "1" ] && log_warn "hard-killed leftover Wine processes"
+    fi
+
+    # 4) desktop resolution / gamma restoration
+    if [ "${MADEIRA_SESSION:-x11}" != "wayland" ] \
+       && [ "${MADEIRA_RESTORE_RESOLUTION:-1}" = "1" ]; then
+        restore_x11_display
+    fi
+
+    log_info "teardown complete"
+    return "$status"
+}
+
+trap madeira_teardown EXIT
+trap 'madeira_teardown 130; exit 130' INT TERM HUP
+# ---------------------------------------------------------------- launch -----
+launch_game() {
+    local cmd=() arg machine vres
+    machine="$(read_pe_machine "$GAME_PATH")"
+    log_dbg "target PE machine: $machine"
+
+    # -- ARM translation: x86/x86_64 targets on aarch64 hosts go through FEX.
+    if [ "$MADEIRA_HOST_ARCH" = "aarch64" ]; then
+        case "$machine" in
+            aarch64)
+                log_dbg "native ARM64 PE — no translation needed"
+                ;;
+            *)
+                local fex="$MADEIRA_RUNTIME_ROOT/share/madeira/fex"
+                if [ -x "$fex/FEXInterpreter" ]; then
+                    export FEX_ROOTFS="$fex/RootFS"
+                    [ -d "$FEX_ROOTFS" ] || \
+                        log_warn "FEX RootFS missing at $FEX_ROOTFS — x86 guest may fail"
+                    cmd+=("$fex/FEXInterpreter")
+                    log_info "aarch64 host: launching through FEX x86→ARM64 translation"
+                else
+                    die "aarch64 host without bundled FEX — x86 games cannot start (build with MADEIRA_BUILD_FEX=1, see linux/BLUEPRINT.md)"
+                fi
+                ;;
+        esac
+    fi
+
+    # -- WoW64 parity note for 32-bit targets (mirrors the iOS app's behavior).
+    if [ "$machine" = "i386" ] && [ ! -d "$MADEIRA_RUNTIME_ROOT/lib/wine/i386-windows" ]; then
+        log_warn "target is 32-bit (i386 PE) but this runtime has no i386 PE set."
+        log_warn "Rebuild with MADEIRA_LINUX_WINE_ARCHS='x86_64,i386' (see linux/BLUEPRINT.md §3.1)."
+    fi
+
+    cmd+=("$MADEIRA_WINE")
+    case "$MADEIRA_VDESKTOP" in
+        1)
+            # auto-size to the desktop mode captured at startup
+            vres="${MADEIRA_X11_RANDR_MODE:-1280x720}"
+            cmd+=(explorer "/desktop=Madeira,$vres")
+            log_info "virtual desktop: $vres"
+            ;;
+        ''|*[!0-9x]*) : ;;   # disabled / invalid → run borderless-fullscreen directly
+        *) cmd+=(explorer "/desktop=Madeira,$MADEIRA_VDESKTOP")
+           log_info "virtual desktop: $MADEIRA_VDESKTOP" ;;
+    esac
+    cmd+=("$GAME_PATH")
+    for arg in ${GAME_ARGS[@]+"${GAME_ARGS[@]}"}; do
+        cmd+=("$arg")
+    done
+
+    # Wine's console output goes to a rotating logfile; --debug prints the
+    # tail after exit. Games inherit fd 9 (prefix lock) closed so a crashed
+    # wrapper never leaves the lock held.
+    local logfile
+    logfile="$(madeira_logs_dir)/wine-$(madeira_stamp).log"
+    log_info "launching: $(printf '%q ' ${cmd[@]+"${cmd[@]}"})"
+    log_info "wine output → $logfile"
+    if require_cmd setsid; then
+        setsid 9>&- "${cmd[@]}" >>"$logfile" 2>&1 &
+    else
+        "${cmd[@]}" >>"$logfile" 2>&1 &
+    fi
+    GAME_PID=$!
+    log_dbg "game pid: $GAME_PID"
+}
+
+# ------------------------------------------------------------------ main -----
+main() {
+    # Locate the bundled runtime first — --doctor must work even when it is
+    # missing (that is exactly when users need diagnostics).
+    find_runtime_root || true
+    if [ "$MADEIRA_DOCTOR" = "1" ]; then
+        detect_all
+        run_doctor
+        exit 0
+    fi
+    # Runtime sanity (launch path only).
+    if [ ! -x "$MADEIRA_RUNTIME_ROOT/bin/wine" ]; then
+        die "bundled Wine not found under ${MADEIRA_RUNTIME_ROOT:-<unset>} — build it with linux/build-runtime.sh (see linux/README.md)"
+    fi
+    MADEIRA_WINE="$MADEIRA_RUNTIME_ROOT/bin/wine"
+    MADEIRA_WINESERVER="$MADEIRA_RUNTIME_ROOT/bin/wineserver"
+
+    # Game resolution: explicit path > MADEIRA_EXE > share/madeira/game/.
+    if [ -z "$GAME_PATH" ]; then
+        local gdir rel exes count
+        gdir="$MADEIRA_RUNTIME_ROOT/share/madeira/game"
+        if [ -f "$gdir/.madeira-game" ]; then
+            rel="$(head -n1 "$gdir/.madeira-game" | tr -d '\r\n')"
+            [ -n "$rel" ] && GAME_PATH="$gdir/$rel"
+        elif [ -d "$gdir" ]; then
+            exes="$(find "$gdir" -maxdepth 3 -type f -iname '*.exe' 2>/dev/null | sort | head -n 8)"
+            count=0
+            [ -n "$exes" ] && count="$(printf '%s\n' "$exes" | grep -c .)"
+            if [ "$count" = "1" ]; then
+                GAME_PATH="$exes"
+            elif [ "$count" -gt 1 ]; then
+                log_error "multiple .exe files under $gdir — pick one explicitly:"
+                printf '%s\n' "$exes" | sed 's/^/  /' >&2
+                exit 2
+            fi
+        fi
+    fi
+    if [ -z "$GAME_PATH" ] && [ "$MADEIRA_DOCTOR" != "1" ]; then
+        usage >&2
+        die "no game specified (positional arg, MADEIRA_EXE, or share/madeira/game/)"
+    fi
+    if [ -n "$GAME_PATH" ]; then
+        case "$GAME_PATH" in
+            [A-Za-z]:\\*|*\\*) : ;;              # Windows-style path: pass through
+            *) [ -f "$GAME_PATH" ] || die "game not found: $GAME_PATH" ;;
+        esac
+        GAME_DIR="$(dirname "$GAME_PATH")"
+    fi
+
+    # Normal launch flow.
+    log_info "Madeira $MADEIRA_VERSION — $(uname -m) — runtime: $MADEIRA_RUNTIME_ROOT"
+    madeira_ensure_dirs
+    madeira_lock_prefix
+    detect_all
+    log_info "session: $MADEIRA_SESSION | gpu: $MADEIRA_GPU_VENDOR | vulkan: $MADEIRA_VULKAN_OK ($MADEIRA_VULKAN_REASON)"
+    log_info "audio: $MADEIRA_AUDIO_BACKEND | sync: ntsync=$MADEIRA_NTSYNC fsync=$MADEIRA_FUTEX2 esync=$MADEIRA_ESYNC | scale: $MADEIRA_SCALE"
+    snapshot_x11_display
+    ensure_prefix
+    select_renderer
+    apply_prefix_tweaks
+    setup_wine_env
+    launch_game
+
+    local rc
+    wait "$GAME_PID" || rc=$?
+    rc="${rc:-0}"
+    if [ "$MADEIRA_DEBUG" = "1" ] || [ "$rc" -ne 0 ]; then
+        log_warn "last 40 lines of the wine log:"
+        tail -n 40 "$(madeira_logs_dir)"/wine-*.log 2>/dev/null | tail -n 40 >&2 || true
+    fi
+    log_info "game exited with status $rc"
+    exit "$rc"
+}
+
+main "$@"

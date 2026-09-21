@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Application
+Name=Madeira
+GenericName=Windows Game Runner
+Comment=Run Windows PC games with a bundled Wine runtime — no system Wine or 32-bit libraries required
+Exec=madeira %f
+TryExec=madeira
+Icon=com.madeira.Madeira
+Terminal=false
+Categories=Game;Emulator;
+Keywords=wine;windows;games;emulation;directx;
+StartupWMClass=madeira
+StartupNotify=true
+Actions=doctor;debug;
+
+[Desktop Action doctor]
+Name=Diagnostics Report
+Comment=Write a system/driver/Wine diagnostics log
+Exec=madeira --doctor
+Icon=com.madeira.Madeira
+
+[Desktop Action debug]
+Name=Run with Debug Logging
+Comment=Launch with verbose Wine/DXVK logging
+Exec=madeira --debug
+Icon=com.madeira.Madeira
