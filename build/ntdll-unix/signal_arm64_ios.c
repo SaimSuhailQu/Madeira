@@ -2770,8 +2770,11 @@ static void *ios_mach_exception_thread( void *arg )
                         *(uint32_t *)rw_addr = (uint32_t)IOS_STORE_SRC(rt);
                         emulated = 1;
                     }
-                    /* STR (immediate, post/pre-index, 64-bit): 1111 1000 00 0imm9 0[10]1 Rn Rt */
-                    else if ((insn & 0xffe00000) == 0xf8000000 && (insn & 0x800) == 0)
+                    /* STR (immediate, unscaled/post/pre-index, 64-bit):
+                     * 1111 1000 00 0imm9 idx Rn Rt. Include pre-index (idx=11)
+                     * as well as post-index (idx=01); idx=00 is the unscaled form.
+                     * Rn=31 names SP, not state.__x[31]. */
+                    else if ((insn & 0xffe00000) == 0xf8000000)
                     {
                         int rt = insn & 0x1f;
                         *(uint64_t *)rw_addr = IOS_STORE_SRC(rt);
@@ -2785,11 +2788,14 @@ static void *ios_mach_exception_thread( void *arg )
                             int rn = (insn >> 5) & 0x1f;
                             int imm9 = (insn >> 12) & 0x1ff;
                             if (imm9 & 0x100) imm9 |= ~0x1ff;  // sign-extend 9-bit
-                            state.__x[rn] = (uint64_t)((int64_t)state.__x[rn] + imm9);
+                            if (rn == 31)
+                                state.__sp = (uint64_t)((int64_t)state.__sp + imm9);
+                            else
+                                state.__x[rn] = (uint64_t)((int64_t)state.__x[rn] + imm9);
                         }
                     }
                     /* STR (immediate, post/pre-index, 32-bit): 1011 1000 00 0imm9 0[10]1 Rn Rt */
-                    else if ((insn & 0xffe00000) == 0xb8000000 && (insn & 0x800) == 0)
+                    else if ((insn & 0xffe00000) == 0xb8000000)
                     {
                         int rt = insn & 0x1f;
                         *(uint32_t *)rw_addr = (uint32_t)IOS_STORE_SRC(rt);
@@ -2800,7 +2806,10 @@ static void *ios_mach_exception_thread( void *arg )
                             int rn = (insn >> 5) & 0x1f;
                             int imm9 = (insn >> 12) & 0x1ff;
                             if (imm9 & 0x100) imm9 |= ~0x1ff;
-                            state.__x[rn] = (uint64_t)((int64_t)state.__x[rn] + imm9);
+                            if (rn == 31)
+                                state.__sp = (uint64_t)((int64_t)state.__sp + imm9);
+                            else
+                                state.__x[rn] = (uint64_t)((int64_t)state.__x[rn] + imm9);
                         }
                     }
                     /* STRB (immediate, post/pre-index, 8-bit): 0011 1000 00 0imm9 0[10]1 Rn Rt
