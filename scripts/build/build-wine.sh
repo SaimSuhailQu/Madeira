@@ -109,16 +109,44 @@ fi
 I386_DIR="$WINE/build-i386"
 I386_OUT="$ROOT/app/Madeira/i386-windows"
 if [[ "${MADEIRA_BUILD_I386:-0}" == "1" ]]; then
-  if [[ ! -f "$I386_DIR/Makefile" ]]; then
-    echo "Configuring Wine (i386 PE set for WoW64)..."
-    mkdir -p "$I386_DIR"
-    (
-      cd "$I386_DIR"
-      ../configure --enable-archs=i386 --disable-tests
-    )
-  fi
+  echo "Configuring Wine (i386 PE set for WoW64)..."
+  rm -rf "$I386_DIR" "$I386_OUT"
+  mkdir -p "$I386_DIR"
+  (
+    cd "$I386_DIR"
+    "$WINE/configure" \
+      --prefix="$I386_DIR/install" \
+      --with-wine-tools="$WINE/build-macos" \
+      --enable-archs=i386 \
+      --disable-tests \
+      --disable-winemenubuilder \
+      --without-x \
+      --without-wayland \
+      --without-xinerama \
+      --without-alsa \
+      --without-pulse \
+      --without-gstreamer \
+      --without-sdl \
+      --without-oss \
+      --without-cups
+  )
+  [[ -f "$I386_DIR/Makefile" ]] || {
+    echo "ERROR: i386 Wine configure produced no Makefile" >&2
+    find "$I386_DIR" -maxdepth 2 -name config.log -print
+    exit 1
+  }
   echo "Building Wine i386 PE set (this is a full PE build; expect a long run)..."
-  make -C "$I386_DIR" -j"$JOBS" dlls programs
+  (
+    cd "$I386_DIR"
+    make -j"$JOBS" dlls programs
+  )
+  pe_count="$(find "$I386_DIR/dlls" "$I386_DIR/programs" \
+    -type f \( -name '*.dll' -o -name '*.exe' \) 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "$pe_count" -eq 0 ]]; then
+    echo "ERROR: i386 build completed without producing PE images" >&2
+    find "$I386_DIR" -maxdepth 2 -type f -name config.log -print
+    exit 1
+  fi
   mkdir -p "$I386_OUT"
   count=0
   while IFS= read -r pe; do
