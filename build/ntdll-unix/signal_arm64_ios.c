@@ -1760,7 +1760,17 @@ static void *ios_mach_exception_thread( void *arg )
                     uintptr_t jit_rx = (uintptr_t)ios_jit_rx_base_global;
                     size_t jit_sz = ios_jit_pool_size_global;
 
-                    if (fault_pc >= jit_rx && fault_pc < jit_rx + jit_sz)
+                    if (thread_trampoline && fault_pc == (uintptr_t)thread_trampoline &&
+                        thread_teb && state.__x[17])
+                    {
+                        state.__x[18] = thread_teb;
+                        __darwin_arm_thread_state64_set_pc_fptr(
+                            state, (void *)(uintptr_t)state.__x[17]);
+                        ios_exc_x18_fixes++;
+                        handled = 1;
+                    }
+
+                    if (!handled && fault_pc >= jit_rx && fault_pc < jit_rx + jit_sz)
                     {
                         /* Exec fault IN JIT pool — only fixable if in .text (x18 issue) */
                         if (ios_jit_addr_is_text(fault_pc) && state.__x[18] == 0 && thread_teb && thread_trampoline)

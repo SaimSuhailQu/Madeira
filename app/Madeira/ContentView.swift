@@ -1131,9 +1131,11 @@ struct ContentView: View {
     @AppStorage("wow64_support") private var wow64Support: Bool = true
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
     @Environment(\.verticalSizeClass) private var vSizeClass
+    @Environment(\.horizontalSizeClass) private var hSizeClass
 
     @State private var showJITAlert = false
     @State private var showBadPoolAlert = false
+    @State private var wineLaunchInProgress = false
 
     enum JITStatus {
         case unknown
@@ -1153,7 +1155,9 @@ struct ContentView: View {
          * two-column selection behaviour. */
         NavigationStack {
             Group {
-                if vSizeClass == .compact {
+                if hSizeClass == .regular {
+                    iPadBody
+                } else if vSizeClass == .compact {
                     landscapeBody
                 } else {
                     portraitBody
@@ -1336,6 +1340,42 @@ struct ContentView: View {
         }
         .ignoresSafeArea()
         .background(Color.black)
+    }
+
+    private var iPadBody: some View {
+        GeometryReader { geo in
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    if let ents = entitlements {
+                        entitlementBadges(ents)
+                    }
+                    HStack(spacing: 6) {
+                        FPSOverlay()
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    MadeiraMetalView()
+                        .aspectRatio(4.0 / 3.0, contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: max(CGFloat(260), geo.size.height * 0.48))
+                        .background(Color.black)
+                    actionButtons
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Wine Log")
+                        .font(.headline)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 12)
+                    logConsole
+                }
+                .frame(width: min(max(geo.size.width * 0.32, 300), 460))
+            }
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
     }
 
     /// Hold-to-press key: VK down on touch, VK up on release — for keys
@@ -1864,7 +1904,14 @@ struct ContentView: View {
     /// Debugger stays attached during PE loading so mprotect_exec can use BRK
     /// to prepare code pages. Detach happens after Wine finishes + recovery.
     private func runWineFullSequence() {
+        guard !wineLaunchInProgress else {
+            logStore.log("Wine launch already in progress; ignoring duplicate request.", level: .debug)
+            return
+        }
+        wineLaunchInProgress = true
+
         guard jit_check_debugged() else {
+            wineLaunchInProgress = false
             logStore.log("JIT not enabled. Press 'Enable JIT' first.", level: .error)
             DispatchQueue.main.async {
                 self.showJITAlert = true
@@ -1994,6 +2041,11 @@ struct ContentView: View {
             // "closes the application" symptom on XS-class phones. A manual
             // override below 384MB (256) still wins.
             let deviceRAMGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0 * 1024.0)
+            let isDesktopSession = getenv("MADEIRA_DESKTOP").map { $0.pointee == 49 } ?? false
+            if isDesktopSession && deviceRAMGB >= 6.0 && poolSizeMB < 896 {
+                logStore.log("Desktop mode: JIT pool \(poolSizeMB)MB → 896MB for Wine DLL fan-out", level: .info)
+                poolSizeMB = 896
+            }
             if deviceRAMGB < 4.6 && poolSizeMB > 384 {
                 logStore.log("Device RAM ≈ \(Int(deviceRAMGB.rounded()))GB: JIT pool \(poolSizeMB)MB → 384MB (jetsam safety on 4GB devices)", level: .info)
                 poolSizeMB = 384
@@ -2251,6 +2303,7 @@ struct ContentView: View {
                 logStore.log("  Try adjusting JIT Pool Size in Settings (e.g. 256MB or 384MB).", level: .info)
                 DispatchQueue.main.async {
                     self.logStore.uiPaused = false
+                    self.wineLaunchInProgress = false
                     NotificationCenter.default.post(name: NSNotification.Name("MadeiraBadPoolNotification"), object: nil)
                 }
                 return
@@ -2283,7 +2336,7 @@ struct ContentView: View {
             // ORDERING MATTERS: our task-port claim installs at wine's first thread
             // setup, which is AFTER this point, so this BRK still reaches StikDebug.
             // Flip to false to A/B against the old attached-for-the-whole-run behaviour.
-            let earlyDetach = true
+            let earlyDetach = false
             if earlyDetach, pool != nil {
                 let dt0 = CFAbsoluteTimeGetCurrent()
                 StikJITHelper.detachDebugger()
@@ -2297,13 +2350,26 @@ struct ContentView: View {
             winios_phase("detach-done")
 
             // Step 2: Start wineserver
-            self.startWineserver()
+            guard self.startWineserver() else {
+                DispatchQueue.main.async {
+                    self.logStore.uiPaused = false
+                    self.wineLaunchInProgress = false
+                }
+                return
+            }
             winios_phase("wineserver-up")
 
             // Step 3: Start Wine (debugger still attached for PE loading BRK calls)
             Thread.sleep(forTimeInterval: 2.0)
             winios_phase("wine-start")
-            self.startWineProcess()
+            guard self.startWineProcess() else {
+                DispatchQueue.main.async {
+                    ws_log_quiet = 0
+                    self.logStore.uiPaused = false
+                    self.wineLaunchInProgress = false
+                }
+                return
+            }
 
             // Step 4: Wait for Wine to finish instead of fixed timer
             // Poll wine_process_is_running() — it clears when __wine_main returns
@@ -2354,7 +2420,6 @@ struct ContentView: View {
                 // mid-session, and later program launches still need the
                 // attached-debugger facilities. Desktop sessions stay
                 // attached until the desktop exits (or the safety cap).
-                let isDesktopSession = getenv("MADEIRA_DESKTOP").map { $0.pointee == 49 } ?? false
                 if !isDesktopSession {
                     if presentingSince == nil && madeira_get_present_count() >= 1 {
                         presentingSince = now
@@ -2384,7 +2449,10 @@ struct ContentView: View {
             logStore.log("Detaching debugger...")
             StikJITHelper.detachDebugger()
 
-            DispatchQueue.main.async { heartbeat.invalidate() }
+            DispatchQueue.main.async {
+                heartbeat.invalidate()
+                self.wineLaunchInProgress = false
+            }
         }
     }
 
@@ -2601,7 +2669,7 @@ struct ContentView: View {
         }
     }
 
-    private func startWineserver() {
+    private func startWineserver() -> Bool {
         logStore.log("Starting wineserver...")
 
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -2615,14 +2683,15 @@ struct ContentView: View {
         } else {
             logStore.log("Failed to start wineserver (error: \(result))", level: .error)
         }
+        return result == 0
     }
 
-    private func startWineProcess() {
+    private func startWineProcess() -> Bool {
         logStore.log("Starting Wine process...")
 
         if wineserver_is_running() == 0 {
             logStore.log("Wineserver not running! Start it first.", level: .error)
-            return
+            return false
         }
 
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -2635,6 +2704,7 @@ struct ContentView: View {
         } else {
             logStore.log("Failed to start Wine process (error: \(result))", level: .error)
         }
+        return result == 0
     }
 
     private func testDualMapping() {
