@@ -33,7 +33,14 @@ jobs:
 
       - name: Set up Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          developer_dir="$(xcode-select -p 2>/dev/null || true)"
+          if [ ! -d "$developer_dir" ]; then
+            developer_dir="$(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' -print | sort -V | tail -n 1)/Contents/Developer"
+          fi
+          test -d "$developer_dir" || { echo "No Xcode installation found"; exit 1; }
+          sudo xcode-select -s "$developer_dir"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+          xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
       - name: Install build tools via Homebrew
@@ -116,10 +123,12 @@ jobs:
 
       - name: Configure Apple compiler environment
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          developer_dir="${DEVELOPER_DIR:-$(xcode-select -p)}"
+          test -d "$developer_dir" || { echo "Selected Xcode is unavailable: $developer_dir"; exit 1; }
+          sudo xcode-select -s "$developer_dir"
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
           echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
-          echo "DEVELOPER_DIR=/Applications/Xcode_15.4.app/Contents/Developer" >> "$GITHUB_ENV"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
