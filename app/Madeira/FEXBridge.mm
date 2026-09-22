@@ -88,9 +88,9 @@ static size_t jit_pool_size_mb() {
     const char *env = getenv("MADEIRA_JIT_POOL_MB");
     if (env && *env) {
         long mb = strtol(env, nullptr, 10);
-        // Clamp to [32, 512] MB for safety.
+        // Clamp to [32, 1024] MB to match the app's maximum pool setting.
         if (mb < 32)  mb = 32;
-        if (mb > 512) mb = 512;
+        if (mb > 1024) mb = 1024;
         cached = (size_t)mb * 1024 * 1024;
     } else {
         cached = JIT_POOL_SIZE_DEFAULT;

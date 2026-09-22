@@ -116,7 +116,7 @@ enum StikJITHelper {
         var pinChunks: [vm_address_t] = []
         let chunkSize = 16 * 1024 * 1024  // 16 MB per chunk
         let pinTarget: vm_address_t = 0x119000000
-        let maxChunks = 32                 // safety cap (512 MB of reservation)
+        let maxChunks = 64                 // safety cap (1024 MB of reservation)
         for i in 0..<maxChunks {
             var addr: vm_address_t = 0
             let kr = vm_allocate(mach_task_self_, &addr, vm_size_t(chunkSize), VM_FLAGS_ANYWHERE)

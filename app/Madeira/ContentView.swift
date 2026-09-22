@@ -1059,7 +1059,7 @@ struct PhoneSettingsSheet: View {
                 }
 
                 Section(header: Text("JIT Pool Size"),
-                        footer: Text("Size of executable JIT memory allocated for x86-64 code. On iPhone XS (4GB RAM), 256MB or 384MB prevents iOS kernel termination.")) {
+                    footer: Text("Madeira uses the largest selected pool on 6GB+ devices. 4GB-class devices are automatically limited to 384MB to reduce iOS termination risk.")) {
                     ForEach(poolOptions, id: \.1) { label, mb in
                         HStack {
                             Text(label)
@@ -1130,7 +1130,7 @@ struct ContentView: View {
     @State private var isResolutionSheetPresented = false
     @State private var isControllerSheetPresented = false
     @AppStorage("wine_desktop_res") private var selectedResolution: String = "960x540"
-    @AppStorage("jit_pool_mb") private var jitPoolMB: Int = 384 // Default to 384MB for phone memory safety
+    @AppStorage("jit_pool_mb") private var jitPoolMB: Int = 1024 // Use the device maximum; 4GB devices are clamped below.
     @AppStorage("phone_optimization") private var phoneOptimization: Bool = true
     /// ml777: 32-bit (WoW64) games & apps. Launches of i386 PEs run through
     /// the WoW64 session when the optional i386-windows PE set is present in
@@ -2057,9 +2057,9 @@ struct ContentView: View {
             // override below 384MB (256) still wins.
             let deviceRAMGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0 * 1024.0)
             let isDesktopSession = getenv("MADEIRA_DESKTOP").map { $0.pointee == 49 } ?? false
-            if isDesktopSession && deviceRAMGB >= 6.0 && poolSizeMB < 896 {
-                logStore.log("Desktop mode: JIT pool \(poolSizeMB)MB → 896MB for Wine DLL fan-out", level: .info)
-                poolSizeMB = 896
+            if deviceRAMGB >= 6.0 && poolSizeMB < 1024 {
+                logStore.log("Device RAM ≈ \(Int(deviceRAMGB.rounded()))GB: JIT pool \(poolSizeMB)MB → 1024MB maximum", level: .info)
+                poolSizeMB = 1024
             }
             if deviceRAMGB < 4.6 && poolSizeMB > 384 {
                 logStore.log("Device RAM ≈ \(Int(deviceRAMGB.rounded()))GB: JIT pool \(poolSizeMB)MB → 384MB (jetsam safety on 4GB devices)", level: .info)
