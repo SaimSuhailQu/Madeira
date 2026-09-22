@@ -142,7 +142,7 @@ jobs:
         id: i386
         run: |
           # Resolved in shell rather than a GitHub expression: the first attempt
-          # used a ${{ }} ternary here and the set was silently never built, with
+          # used an inline GitHub expression ternary here and the set was silently never built, with
           # a green run and a byte-identical IPA. Shell conditionals are
           # predictable; the verification step below makes the outcome explicit
           # either way.
