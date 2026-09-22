@@ -32,6 +32,7 @@ MADEIRA_EXTRA_ENV=()
 GAME_PATH=""
 GAME_ARGS=()
 GAME_DIR=""
+MADEIRA_WINE_LOG=""
 
 usage() {
     cat <<'USAGE'
@@ -41,7 +42,7 @@ Usage: madeira [OPTIONS] [--] [GAME.EXE [GAME-ARGS...]]
 
 Options:
   --doctor                Write a diagnostics report to the log dir and exit.
-  --debug                 Verbose Wine/DXVK logging (tee'd to the log dir).
+  --debug                 Verbose Wine/DXVK logging; replays the full log on exit.
   --renderer=MODE         auto | dxvk | wined3d      (default: auto)
   --preset=PRESET         default | low              (low: older/weak hardware)
   --prefix=PATH           Custom WINEPREFIX (default: XDG data dir /madeira/prefix)
@@ -143,9 +144,7 @@ unset _lib _libfile
 # --------------------------------------------------- environment hardening ---
 # All Wine/game environment tuning lives here so it is auditable in one place.
 setup_wine_env() {
-    WINEPREFIX="$(madeira_prefix_dir)"
-    export WINEPREFIX
-    log_dbg "WINEPREFIX=$WINEPREFIX"
+    export_prefix_env
 
     # -- Wine debug spam: off. (--debug re-enables the useful channels.)
     export WINEDEBUG="-all"
@@ -158,7 +157,7 @@ setup_wine_env() {
 
     # -- Renderer DLL overrides (';' separates entries, ',' orders fallbacks).
     if [ "$MADEIRA_USE_DXVK" = "1" ]; then
-        export WINEDLLOVERRIDES="d3d9=n,b;d3d10core=n,b;d3d11=n,b;dxgi=n,b;mscoree=d;mshtml=d"
+        export WINEDLLOVERRIDES="d3d8=n,b;d3d9=n,b;d3d10core=n,b;d3d11=n,b;dxgi=n,b;mscoree=d;mshtml=d"
         [ "$MADEIRA_USE_VKD3D" = "1" ] && \
             export WINEDLLOVERRIDES="$WINEDLLOVERRIDES;d3d12=n,b"
     else
@@ -361,17 +360,16 @@ launch_game() {
         cmd+=("$arg")
     done
 
-    # Wine's console output goes to a rotating logfile; --debug prints the
-    # tail after exit. Games inherit fd 9 (prefix lock) closed so a crashed
+    # Wine's console output goes to a rotating logfile; --debug replays the whole
+    # file after exit. Games inherit fd 9 (prefix lock) closed so a crashed
     # wrapper never leaves the lock held.
-    local logfile
-    logfile="$(madeira_logs_dir)/wine-$(madeira_stamp).log"
+    MADEIRA_WINE_LOG="$(madeira_logs_dir)/wine-$(madeira_stamp).log"
     log_info "launching: $(printf '%q ' ${cmd[@]+"${cmd[@]}"})"
-    log_info "wine output → $logfile"
+    log_info "wine output → $MADEIRA_WINE_LOG"
     if require_cmd setsid; then
-        setsid 9>&- "${cmd[@]}" >>"$logfile" 2>&1 &
+        setsid 9>&- "${cmd[@]}" >>"$MADEIRA_WINE_LOG" 2>&1 &
     else
-        "${cmd[@]}" >>"$logfile" 2>&1 &
+        "${cmd[@]}" >>"$MADEIRA_WINE_LOG" 2>&1 &
     fi
     GAME_PID=$!
     log_dbg "game pid: $GAME_PID"
@@ -434,6 +432,9 @@ main() {
     log_info "session: $MADEIRA_SESSION | gpu: $MADEIRA_GPU_VENDOR | vulkan: $MADEIRA_VULKAN_OK ($MADEIRA_VULKAN_REASON)"
     log_info "audio: $MADEIRA_AUDIO_BACKEND | sync: ntsync=$MADEIRA_NTSYNC fsync=$MADEIRA_FUTEX2 esync=$MADEIRA_ESYNC | scale: $MADEIRA_SCALE"
     snapshot_x11_display
+    # WINEPREFIX has to be exported before ensure_prefix/apply_prefix_tweaks:
+    # both run Wine (wineboot, regedit) and an unset WINEPREFIX targets ~/.wine.
+    export_prefix_env
     ensure_prefix
     select_renderer
     apply_prefix_tweaks
@@ -443,9 +444,14 @@ main() {
     local rc
     wait "$GAME_PID" || rc=$?
     rc="${rc:-0}"
-    if [ "$MADEIRA_DEBUG" = "1" ] || [ "$rc" -ne 0 ]; then
-        log_warn "last 40 lines of the wine log:"
-        tail -n 40 "$(madeira_logs_dir)"/wine-*.log 2>/dev/null | tail -n 40 >&2 || true
+    # --debug replays the complete log. A plain failure keeps a bounded tail so a
+    # wedged title cannot scroll the terminal history away.
+    if [ "$MADEIRA_DEBUG" = "1" ]; then
+        log_info "full wine log — $MADEIRA_WINE_LOG"
+        cat "$MADEIRA_WINE_LOG" 2>/dev/null >&2 || true
+    elif [ "$rc" -ne 0 ]; then
+        log_warn "last 40 lines of the wine log (rerun with --debug for all of it):"
+        tail -n 40 "$MADEIRA_WINE_LOG" 2>/dev/null >&2 || true
     fi
     log_info "game exited with status $rc"
     exit "$rc"

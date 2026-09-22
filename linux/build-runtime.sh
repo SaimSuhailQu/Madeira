@@ -12,8 +12,10 @@
 # Stages (each skippable, see env vars below):
 #   1. Wine fork — "new WoW64" single build (--enable-archs=x86_64,i386):
 #      64-bit unix side + BOTH PE sets ⇒ the bundle needs NO 32-bit host
-#      libraries at all. Built inside an ubuntu:24.04 container with mingw-w64
-#      (x86_64) or pinned llvm-mingw (aarch64). iOS-specific fork patches are
+#      libraries at all. Built inside an ubuntu:24.04 container with the
+#      x86_64 *and* i686 mingw-w64 cross compilers (both are required: without
+#      the i686 one Wine silently configures without the i386 PE set and every
+#      32-bit game then fails to start). iOS-specific fork patches are
 #      intentionally NOT applied — they are Apple-only.
 #   2. DXVK + VKD3D-Proton — pinned upstream release tarballs (sha256 gate).
 #   3. FEX-Emu — aarch64 hosts only (x86→ARM translation + RootFS). Experimental.
@@ -82,6 +84,7 @@ apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
     build-essential flex bison gettext pkg-config file curl ca-certificates \
     gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+    gcc-mingw-w64-i686 g++-mingw-w64-i686 \
     libx11-dev libxext-dev libxrender-dev libxrandr-dev libxi-dev \
     libxcursor-dev libxfixes-dev libxcomposite-dev libxxf86vm-dev \
     libglib2.0-dev libfreetype-dev libfontconfig-dev libgnutls28-dev \
@@ -222,6 +225,17 @@ rm -rf "$WINEPREFIX/drive_c/windows/winsxs" \
        "$WINEPREFIX/drive_c/windows/system32/winmetadata" \
        "$WINEPREFIX/drive_c/windows/system32/WindowsPowerShell"
 rm -rf "$WINEPREFIX/dosdevices" "$WINEPREFIX/drive_c/users/$BUILD_USER"
+
+# Wine creates the shell folders as absolute symlinks into the build host's
+# home (/root/Desktop, ... here). That path exists on no user machine, so a
+# prefix seeded from them cannot resolve My Documents and games that save or
+# log there fail. Ship real directories instead — lib/prefix.sh repairs this at
+# first run too, for bundles built before this fix.
+for d in Desktop Documents Downloads Music Pictures Videos; do
+    u="$WINEPREFIX/drive_c/users/madeira/$d"
+    if [ -L "$u" ]; then rm -f "$u"; fi
+    mkdir -p "$u"
+done
 
 tar -C /tmp -czf /rt/share/madeira/prefix-template.tar.gz prefix
 PREFIX_BUILD
