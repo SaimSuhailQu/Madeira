@@ -134,6 +134,13 @@ if [[ "${MADEIRA_BUILD_I386:-0}" == "1" ]]; then
     count=$((count + 1))
   done < <(find "$I386_DIR/dlls" "$I386_DIR/programs" -type f \( -name '*.dll' -o -name '*.exe' \) 2>/dev/null)
   echo "i386-windows: collected $count PE images into $I386_OUT"
+  # A zero-image collection must fail loudly. package-ipa.sh bundles whatever
+  # sits in that directory, so an empty set used to yield a green build whose
+  # IPA had no 32-bit support at all.
+  if [[ "$count" -eq 0 ]]; then
+    echo "ERROR: i386 build produced no PE images (searched $I386_DIR/dlls and $I386_DIR/programs)" >&2
+    exit 1
+  fi
   [[ -f "$I386_OUT/ntdll.dll" ]] || {
     echo "WARNING: i386 set collected but ntdll.dll is missing — WoW64 will not initialise" >&2
   }

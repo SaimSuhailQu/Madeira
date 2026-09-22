@@ -138,17 +138,43 @@ jobs:
         run: |
           find scripts build -type f -name '*.sh' -exec chmod +x {} +
 
+      - name: Resolve the 32-bit (i386) build flag
+        id: i386
+        run: |
+          # Resolved in shell rather than a GitHub expression: the first attempt
+          # used a ${{ }} ternary here and the set was silently never built, with
+          # a green run and a byte-identical IPA. Shell conditionals are
+          # predictable; the verification step below makes the outcome explicit
+          # either way.
+          flag=1
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.build_i386 }}" = "false" ]; then
+            flag=0
+          fi
+          echo "value=$flag" >> "$GITHUB_OUTPUT"
+          echo "MADEIRA_BUILD_I386=$flag" >> "$GITHUB_ENV"
+          echo "32-bit PE set: MADEIRA_BUILD_I386=$flag"
+
       - name: Run build-ipa.sh
-        env:
-          # The optional 32-bit PE set. build-wine.sh builds it only when
-          # MADEIRA_BUILD_I386=1, and package-ipa.sh then bundles
-          # app/Madeira/i386-windows automatically when it exists — no commit
-          # needed, which matters because the other two PE sets are ~110-134 MB.
-          # On by default for push and PR too; dispatch a run with build_i386
-          # unchecked to produce a non-WoW64 bundle for comparison.
-          MADEIRA_BUILD_I386: ${{ github.event_name == 'workflow_dispatch' && inputs.build_i386 == false && '0' || '1' }}
         run: |
           ./scripts/build-ipa.sh
+
+      - name: Verify the 32-bit PE set was bundled
+        if: steps.i386.outputs.value == '1'
+        run: |
+          # A green build is not evidence the set exists: package-ipa.sh bundles
+          # app/Madeira/i386-windows whenever the directory is present, so an
+          # empty one yields a successful IPA with no 32-bit support at all.
+          n=$(find app/Madeira/i386-windows -name '*.dll' 2>/dev/null | wc -l | tr -d ' ')
+          echo "i386 PE images collected: $n"
+          if [ "$n" -lt 50 ]; then
+            echo "::error::MADEIRA_BUILD_I386=1 but only $n i386 PE images exist — the WoW64 set was not produced, so this bundle is not 32-bit capable."
+            exit 1
+          fi
+          test -f app/Madeira/i386-windows/ntdll.dll || {
+            echo "::error::i386 set has no ntdll.dll — WoW64 cannot initialise."
+            exit 1
+          }
+          du -sh app/Madeira/i386-windows
 
       - name: Print failed DXMT compiler logs
         if: failure()
