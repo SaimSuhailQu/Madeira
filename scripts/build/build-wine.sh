@@ -135,16 +135,26 @@ if [[ "${MADEIRA_BUILD_I386:-0}" == "1" ]]; then
     find "$I386_DIR" -maxdepth 2 -name config.log -print
     exit 1
   }
+  (
+    cd "$I386_DIR"
+    echo "i386 Wine build directory: $PWD"
+    grep -E '^(host|host_cpu|enable_win64|DLL|PROGRAM)' config.status config.log 2>/dev/null || true
+    find dlls programs -type f -name Makefile -print | head -30 || true
+  )
   echo "Building Wine i386 PE set (this is a full PE build; expect a long run)..."
   (
     cd "$I386_DIR"
     make -j"$JOBS" dlls programs
+    # The directory targets can be no-ops in a partially generated tree;
+    # follow them with Wine's complete default target to build all PE rules.
+    make -j"$JOBS"
   )
   pe_count="$(find "$I386_DIR/dlls" "$I386_DIR/programs" \
     -type f \( -name '*.dll' -o -name '*.exe' \) 2>/dev/null | wc -l | tr -d ' ')"
-  if [[ "$pe_count" -eq 0 ]]; then
+  if [[ "$pe_count" -lt 50 ]]; then
     echo "ERROR: i386 build completed without producing PE images" >&2
     find "$I386_DIR" -maxdepth 2 -type f -name config.log -print
+    find "$I386_DIR/dlls" "$I386_DIR/programs" -type f \( -name '*.dll' -o -name '*.exe' \) 2>/dev/null | head -20 || true
     exit 1
   fi
   mkdir -p "$I386_OUT"

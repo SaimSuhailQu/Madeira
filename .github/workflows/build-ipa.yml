@@ -99,11 +99,11 @@ jobs:
           path: |
             wine/build-macos
             wine/build-arm64ec
-            wine/build-i386
-          # v4: invalidate incomplete i386 build trees and force a clean PE build.
-          key: ${{ runner.os }}-wine-host-v4-${{ hashFiles('wine/**', 'scripts/build-ipa.sh', 'scripts/build/build-wine.sh') }}
+          # v5: never restore the optional i386 tree; it is always configured
+          # and built from scratch by build-wine.sh.
+          key: ${{ runner.os }}-wine-host-v5-${{ hashFiles('wine/**', 'scripts/build-ipa.sh', 'scripts/build/build-wine.sh') }}
           restore-keys: |
-            ${{ runner.os }}-wine-host-v4-
+            ${{ runner.os }}-wine-host-v5-
 
       - name: Clean Wine build trees
         run: |
