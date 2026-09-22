@@ -10,7 +10,7 @@ on:
       build_i386:
         description: 'Build the optional 32-bit (i386/WoW64) PE set'
         type: boolean
-        default: false
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -149,9 +149,9 @@ jobs:
           # a green run and a byte-identical IPA. Shell conditionals are
           # predictable; the verification step below makes the outcome explicit
           # either way.
-          flag=0
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.build_i386 }}" = "true" ]; then
-            flag=1
+          flag=1
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.build_i386 }}" = "false" ]; then
+            flag=0
           fi
           echo "value=$flag" >> "$GITHUB_OUTPUT"
           echo "MADEIRA_BUILD_I386=$flag" >> "$GITHUB_ENV"

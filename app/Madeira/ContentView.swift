@@ -1111,6 +1111,13 @@ struct PhoneSettingsSheet: View {
 }
 
 struct ContentView: View {
+    private enum MadeiraTheme {
+        static let canvas = Color(red: 0.055, green: 0.063, blue: 0.078)
+        static let panel = Color(red: 0.090, green: 0.102, blue: 0.125)
+        static let accent = Color(red: 0.98, green: 0.42, blue: 0.20)
+        static let divider = Color.white.opacity(0.10)
+    }
+
     @StateObject private var logStore = LogStore.shared
     @StateObject private var gameControllerManager = GameControllerManager.shared
     @State private var jitStatus: JITStatus = .unknown
@@ -1163,6 +1170,8 @@ struct ContentView: View {
                     portraitBody
                 }
             }
+            .tint(MadeiraTheme.accent)
+            .background(MadeiraTheme.canvas)
             // Rotation destroys/recreates the UIViewRepresentable across
             // this if/else (two SwiftUI identities) — HARMLESS since
             // 2026-07-05: MetalHostView is a process-lifetime singleton;
@@ -1304,9 +1313,12 @@ struct ContentView: View {
             .zIndex(10)
             Divider()
             actionButtons
-            Divider()
+                .background(MadeiraTheme.panel)
+            Divider().overlay(MadeiraTheme.divider)
             logConsole
+                .background(MadeiraTheme.canvas)
         }
+        .background(MadeiraTheme.canvas)
     }
 
     /// Landscape: game mode. Full-height 4:3 surface centered (aspect-fit
@@ -1363,7 +1375,7 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                Divider()
+                Divider().overlay(MadeiraTheme.divider)
 
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Wine Log")
@@ -1375,7 +1387,7 @@ struct ContentView: View {
                 .frame(width: min(max(geo.size.width * 0.32, 300), 460))
             }
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(MadeiraTheme.canvas)
     }
 
     /// Hold-to-press key: VK down on touch, VK up on release — for keys
@@ -1488,6 +1500,7 @@ struct ContentView: View {
         .padding(.horizontal)
         .padding(.top, 4)
         .padding(.bottom, 8)
+        .background(MadeiraTheme.panel)
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             debuggerAttached = isDebuggerAttached()
         }
@@ -1523,7 +1536,7 @@ struct ContentView: View {
 
     private var actionButtons: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 Button("Enable JIT") {
                     enableJITViaStikDebug()
                 }
@@ -1681,8 +1694,10 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .tint(.red)
             }
-            .padding()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
+        .background(MadeiraTheme.panel)
     }
 
     private func runTriangleTest() {
