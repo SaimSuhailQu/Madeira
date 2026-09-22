@@ -454,13 +454,27 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
                             NSData *out = [patched dataUsingEncoding:NSUTF8StringEncoding];
                             if ([out writeToFile:sysRegPath atomically:YES]) {
                                 LOG("display-drv-patch: system.reg GraphicsDriver → null");
+                                /* Marker written ONLY on a real patch. The shipped
+                                 * prefix-template.tar.gz contains no
+                                 * Control\Video\{GUID}\0000 key at all — that key
+                                 * is created at runtime, when the display device
+                                 * registers — so the first launch legitimately
+                                 * finds nothing to rewrite. Leaving the prefix
+                                 * unmarked makes this retry next launch, by which
+                                 * time wineserver has persisted the key into
+                                 * system.reg. Marking a no-op as done (which is
+                                 * what used to happen here) wedged the prefix
+                                 * forever: all three display DLLs stayed in the
+                                 * registry, so load_desktop_driver kept calling
+                                 * KeUserModeCallback(NtUserLoadDriver) and probing
+                                 * winemac/winex11/winewayland on every launch. */
+                                [@"patched" writeToFile:drvMarker atomically:YES encoding:NSUTF8StringEncoding error:nil];
                             } else {
-                                LOG("display-drv-patch: system.reg write FAILED");
+                                LOG("display-drv-patch: system.reg write FAILED — will retry next launch");
                             }
                         } else {
-                            LOG("display-drv-patch: system.reg has no platform GraphicsDriver to patch");
+                            LOG("display-drv-patch: no platform GraphicsDriver in system.reg yet (key appears at runtime) — will retry next launch");
                         }
-                        [@"patched" writeToFile:drvMarker atomically:YES encoding:NSUTF8StringEncoding error:nil];
                     }
                 }
             }
@@ -509,12 +523,24 @@ static void *wine_process_thread(void *arg) {
          *
          * Default is now PERF: only err+all (so we still see real failures).
          * For debugging, set MADEIRA_DEBUG_VERBOSE=1 in the environment to
-         * restore the full trace channel set. */
+         * restore the full trace channel set — or build with DEBUG=1 (the Xcode
+         * Debug configuration already defines it), where the full set is the
+         * default and MADEIRA_DEBUG_VERBOSE=0 opts back out. The extra log volume
+         * and the frame cost it adds are the reason a debug build exists; in a
+         * Release build the env var stays the only way in. */
         {
-            const char *verbose = getenv("MADEIRA_DEBUG_VERBOSE");
-            if (verbose && *verbose && *verbose != '0') {
+            const char *verbose_env = getenv("MADEIRA_DEBUG_VERBOSE");
+            const int verbose_off = (verbose_env != NULL && *verbose_env == '0');
+            const char *why = (verbose_env != NULL && *verbose_env != '\0')
+                                ? "MADEIRA_DEBUG_VERBOSE" : "DEBUG build default";
+#ifdef DEBUG
+            const int verbose = !verbose_off;
+#else
+            const int verbose = (verbose_env != NULL && *verbose_env != '\0' && !verbose_off);
+#endif
+            if (verbose) {
                 setenv("WINEDEBUG", "err+all,fixme+all,warn+module,warn+file,trace+process,trace+module,trace+loaddll,trace+loadorder,trace+win,trace+user32,trace+syscall,trace+file", 1);
-                LOG("WINEDEBUG = verbose (MADEIRA_DEBUG_VERBOSE set)");
+                LOG("WINEDEBUG = verbose (full trace channel set, via %{public}s)", why);
             } else {
                 /* err+all keeps real failure messages, but subtract err+virtual
                  * because our iOS virtual_ios.c uses ERR() for informational
@@ -538,21 +564,30 @@ static void *wine_process_thread(void *arg) {
         // when create_window receives it as req->parent.
         setenv("MADEIRA_WIN32U", "1", 1);
 
-        /* iOS platform driver suppression — fixes "status=c0000135 DLL not found"
-         * for winemac.drv / winex11.drv / winewayland.drv.
+        /* iOS platform driver suppression — reduces the fallout from
+         * "status=c0000135 DLL not found" for winemac.drv / winex11.drv /
+         * winewayland.drv.
          *
          * Wine's load_desktop_driver() reads GraphicsDriver from the registry and
          * calls KeUserModeCallback(NtUserLoadDriver) with that name. On a prefix
          * that hasn't been patched to say "null", it tries each platform driver in
          * sequence until one loads. None of those DLLs exist in our iOS bundle, so
-         * every attempt produces STATUS_DLL_NOT_FOUND (c0000135). Setting them
-         * DISABLED here causes the loader to skip the KeUserModeCallback call
-         * entirely; load_display_driver()'s WINE_IOS block then takes over and
-         * wires up winios_user_driver directly.
+         * every attempt ends in STATUS_DLL_NOT_FOUND (c0000135).
          *
-         * "=" alone is DISABLED (not native/builtin) in Wine's DLL-override syntax.
+         * These overrides are NOT what prevents that callback — worth stating,
+         * because this comment used to claim they skipped it. load_desktop_driver()
+         * gates the call solely on the registry value being the literal "null"
+         * (win32u/driver.c, query_reg_ascii_value) and never consults an override;
+         * ntdll's load_builtin() checks LO_DISABLED only *after* the file search,
+         * so the search — and its ml665 NtCreateFile probes — happen either way.
+         * The registry patch in madeira_seed_prefix_if_needed() is the real fix;
+         * these entries just make the eventual load fail fast and deterministically
+         * instead of depending on search order.
+         *
+         * "=" alone is DISABLED (not native/builtin) in Wine's DLL-override syntax:
+         * parse_load_order() returns LO_DISABLED for an empty value.
          * winemac.drv is tried first on arm64-darwin builds; winex11/winewayland
-         * follow as fallbacks. All three must be blocked. */
+         * follow as fallbacks. All three must be listed. */
         {
             const char *existing = getenv("WINEDLLOVERRIDES");
             NSString *base = existing ? [NSString stringWithUTF8String:existing] : @"";
