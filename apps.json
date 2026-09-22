@@ -1,6 +1,7 @@
 {
   "name": "Madeira",
   "identifier": "com.saimsuhail.madeira.source",
+  "sourceURL": "https://raw.githubusercontent.com/SaimSuhailQu/Madeira/main/apps.json",
   "subtitle": "Windows x86-64 Emulation on iOS",
   "description": "Official SideStore, AltStore, and LiveContainer community source for Madeira — run Windows x86-64 games and software on iOS.",
   "iconURL": "https://raw.githubusercontent.com/SaimSuhailQu/Madeira/main/app/Madeira/Assets.xcassets/AppIcon.appiconset/icon_1024.png",
@@ -10,8 +11,9 @@
       "name": "Madeira",
       "bundleIdentifier": "com.willfaust.mythicemu",
       "developerName": "Madeira Team",
+      "subtitle": "Windows x86-64 Emulation on iOS",
       "version": "0.1.0",
-      "versionDate": "2026-09-19",
+      "versionDate": "2026-09-22T00:00:00+0000",
       "versionDescription": "Madeira iOS x86-64 Wine Emulator with auto-updating SideStore/LiveContainer community source, robust JIT native dual-mapping, and phone stability fixes.",
       "downloadURL": "https://github.com/SaimSuhailQu/Madeira/releases/latest/download/Madeira.ipa",
       "localizedDescription": "Run x86-64 Windows apps and games on iOS with Wine, FEX, and DXMT with full JIT acceleration.",
@@ -19,7 +21,23 @@
       "tintColor": "#00E5FF",
       "size": 150000000,
       "screenshotURLs": [],
-      "minOSVersion": "15.0"
+      "minOSVersion": "17.0",
+      "appPermissions": {
+        "entitlements": [
+          {
+            "name": "com.apple.security.cs.allow-jit"
+          },
+          {
+            "name": "com.apple.developer.kernel.increased-memory-limit"
+          },
+          {
+            "name": "com.apple.developer.kernel.extended-virtual-addressing"
+          },
+          {
+            "name": "get-task-allow"
+          }
+        ]
+      }
     }
   ],
   "news": [
@@ -27,9 +45,12 @@
       "title": "Madeira Auto-Update Source Available",
       "identifier": "madeira-autoupdate-source",
       "caption": "Add this source into SideStore or LiveContainer for automatic updates!",
-      "date": "2026-09-19",
+      "date": "2026-09-22",
       "tintColor": "#00E5FF",
-      "appID": "com.willfaust.mythicemu"
+      "imageURL": "https://raw.githubusercontent.com/SaimSuhailQu/Madeira/main/app/Madeira/Assets.xcassets/AppIcon.appiconset/icon_1024.png",
+      "url": "https://github.com/SaimSuhailQu/Madeira",
+      "appID": "com.willfaust.mythicemu",
+      "notify": true
     }
   ]
 }
