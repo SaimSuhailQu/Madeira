@@ -126,14 +126,3 @@ research/remote-metal/guest/rmreplay
 research/remote-metal/guest/rmres
 research/remote-metal/guest/rmclient_test
 research/remote-metal/host/rmetald
-
-# Linux packaging artifacts (regenerable; all under build/ *and* dist/)
-#   linux/build-runtime.sh -> build/linux-runtime/  + dist/madeira-runtime-<arch>.tar.gz
-#   linux/appimage/        -> build/appimage/       + dist/Madeira-<ver>-<arch>.AppImage
-#   linux/flatpak/         -> build/flatpak/        + dist/com.madeira.Madeira-<arch>.flatpak
-# Override the roots with MADEIRA_BUILD_DIR / MADEIRA_DIST_DIR if you park them
-# elsewhere, and add your own ignore entry for that location.
-build/linux-runtime/
-build/appimage/
-build/flatpak/
-dist/

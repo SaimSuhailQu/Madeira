@@ -15,30 +15,17 @@ controls are not yet reliable. Others reach gameplay at low frame rates. This
 is a research project, not a product: expect rough edges, per-title quirks and
 breaking changes.
 
-**32-bit (WoW64) games & apps:** launches now detect the target's PE
-architecture and run 32-bit x86 binaries through an i386 (WoW64) session
-when the optional `i386-windows` PE set is built into the bundle
-(`MADEIRA_BUILD_I386=1 ./scripts/build/build-wine.sh`; see
-[BUILDING.md](BUILDING.md)). Without it, 32-bit launches degrade with a
-clear log instead of crashing. **Steam:** the launch path probes
-`steam.exe`'s PE header — the real 32-bit Steam client is accepted when
-WoW64 support is present, 64-bit archives run as before, and 4 GB-class
-devices (iPhone XS/XR/11) get an automatic JIT-pool clamp plus a pre-run
-memory briefing to avoid the iOS jetsam "app closes to home screen" kill.
-
 ## Requirements
 
-## Auto-Updates (SideStore / AltStore / LiveContainer Source)
+- A non-jailbroken iPhone. Development has been on an A15 (iPhone 13 Pro).
+- JIT, which on iOS requires a debugger to attach —
+  [StikDebug](https://github.com/0-Blu/StikJIT) is what this project uses.
+- An Apple ID for signing. A free account works; its provisioning profiles
+  expire after 7 days, so the app must be rebuilt and reinstalled weekly. The
+  app's container survives reinstall, so prefixes and saves are preserved.
 
-You can add Madeira directly to **SideStore**, **AltStore**, or **LiveContainer** to receive automatic updates:
-
-1. In SideStore / AltStore, navigate to the **Sources** tab.
-2. Tap **+** and add the repository source URL:
-   ```
-   https://raw.githubusercontent.com/SaimSuhailQu/Madeira/main/apps.json
-   ```
-3. Madeira will appear in your browse list and notify you whenever a new release build is published!
-4. For **LiveContainer**, open LiveContainer and add Madeira using the source URL or download the IPA directly from [Releases](https://github.com/SaimSuhailQu/Madeira/releases). JIT is natively dual-mapped.
+Because JIT requires debugger attach, this app cannot be distributed through the
+App Store. It is installed by sideloading.
 
 ## Building
 
@@ -48,11 +35,7 @@ the native pieces; the app is built with `xcodebuild`.
 
 ```sh
 git clone --recurse-submodules <this repo>
-cd Madeira
-./scripts/build-ipa.sh   # produces dist/Madeira.ipa
 ```
-
-See [`BUILDING.md`](BUILDING.md) for prerequisites, timing, and re-run notes.
 
 Note that `FEX`, `wine` and `research/dxmt` are submodules pointing at forks
 containing the iOS work; upstream clones will not build here.
