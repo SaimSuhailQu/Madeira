@@ -846,6 +846,9 @@ struct ContentView: View {
     @State private var entitlements: EntitlementStatus?
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
+    @StateObject private var gameLibrary = GameLibraryManager.shared
+    @State private var selectedLibraryItem: LibraryItem?
+    @State private var showLibrarySheet = false
     @State private var pointerPanel = false
     @Namespace private var pointerNS
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
@@ -1127,13 +1130,94 @@ struct ContentView: View {
         }
     }
 
-    private var actionButtons: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                Button("Enable JIT") {
-                    enableJITViaStikDebug()
+    private func launchLibraryItem(_ item: LibraryItem) {
+        logStore.log("Launching from Library: \(item.name) (\(item.exePath))", level: .info)
+        setenv("MADEIRA_EXE", item.exePath, 1)
+
+        if !item.args.isEmpty {
+            setenv("MADEIRA_ARGS", item.args, 1)
+        } else {
+            unsetenv("MADEIRA_ARGS")
+        }
+
+        if let appId = item.appId, !appId.isEmpty {
+            setenv("SteamAppId", appId, 1)
+            setenv("SteamGameId", appId, 1)
+        }
+
+        if item.is64Bit {
+            setenv("MADEIRA_USE_ARM64EC", "1", 1)
+        } else {
+            unsetenv("MADEIRA_USE_ARM64EC")
+        }
+
+        if item.exePath.lowercased().contains("explorer.exe") {
+            setenv("MADEIRA_DESKTOP", "1", 1)
+            setenv("MADEIRA_SCREEN_W", "1024", 1)
+            setenv("MADEIRA_SCREEN_H", "768", 1)
+        } else {
+            unsetenv("MADEIRA_DESKTOP")
+        }
+
+        runWineFullSequence()
+    }
+
+    private var libraryDockView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("DOCK & LIBRARY")
+                    .font(.caption2)
+                    .fontWeight(.bold)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button(action: {
+                    gameLibrary.reloadLibrary()
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 12)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(gameLibrary.items) { item in
+                        Button(action: {
+                            launchLibraryItem(item)
+                        }) {
+                            VStack(spacing: 4) {
+                                Image(systemName: item.iconName)
+                                    .font(.system(size: 20))
+                                    .foregroundColor(item.isTool ? .cyan : .green)
+                                    .frame(width: 44, height: 44)
+                                    .background(Circle().fill(Color.white.opacity(0.12)))
+
+                                Text(item.name)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.primary)
+                                    .lineLimit(1)
+                                    .frame(width: 60)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    private var actionButtons: some View {
+        VStack(spacing: 8) {
+            libraryDockView
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    Button("Enable JIT") {
+                        enableJITViaStikDebug()
+                    }
+                    .buttonStyle(.borderedProminent)
 
                 Button("Steam Testing") {
                     // Steam S3 first boot: virtual desktop (Steam needs a
@@ -1512,6 +1596,7 @@ struct ContentView: View {
             }
             .padding()
         }
+    }
     }
 
     private func runTriangleTest() {
