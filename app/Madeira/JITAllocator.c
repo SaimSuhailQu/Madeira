@@ -367,29 +367,8 @@ void *jit_region_write(JITRegion *region, size_t offset, const void *code, size_
     return (char *)region->rx_ptr + offset;
 }
 
-// Helper for Swift/runtime to create a direct dual-mapped JIT memory pool
-bool jit_create_pool_dual_map(size_t size, void **out_rx, void **out_rw) {
-    if (!out_rx || !out_rw) return false;
-    JITRegion *reg = jit_region_create(size);
-    if (!reg) {
-        jit_log("jit_create_pool_dual_map: failed to create dual-mapped region for size=%zu", size);
-        return false;
-    }
-    *out_rx = reg->rx_ptr;
-    *out_rw = reg->rw_ptr;
-    jit_log("jit_create_pool_dual_map: SUCCESS size=%zu, RX=%p, RW=%p", size, *out_rx, *out_rw);
-    return true;
-}
-
-void jit_destroy_pool_dual_map(void *rx_addr, void *rw_addr, size_t size) {
-    mach_port_t task = mach_task_self();
-    if (rx_addr) vm_deallocate(task, (vm_address_t)rx_addr, size);
-    if (rw_addr) vm_deallocate(task, (vm_address_t)rw_addr, size);
-}
-
 // SIGTRAP handler: skips BRK instruction (PC += 4) and zeros x0.
-// This prevents crashes when BRK is executed without a debugger attached or under environments
-// where the debugger does not intercept custom BRK #0xf00d (LiveContainer, SideStore, standard lldb).
+// This prevents crashes when BRK is executed without a debugger attached.
 static void sigtrap_handler(int sig, siginfo_t *info, void *context) {
     (void)sig;
     (void)info;
@@ -399,16 +378,19 @@ static void sigtrap_handler(int sig, siginfo_t *info, void *context) {
 }
 
 void jit_install_trap_handler(void) {
-    // Install SIGTRAP handler unconditionally.
-    // In LiveContainer, TrollStore, or standard debuggers without custom JS scripts,
-    // csops reports CS_DEBUGGED=1, but no debugger is intercepting BRK #0xf00d,
-    // which causes instant termination if not trapped here.
+    // Only install if no debugger is attached.
+    // When StikDebug is attached, it handles BRK/SIGTRAP directly.
+    // Our handler would steal signals from the debugger and break the protocol.
+    if (jit_check_debugged()) {
+        jit_log("Debugger attached — skipping SIGTRAP handler (debugger handles BRK)");
+        return;
+    }
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_flags = SA_SIGINFO;
     sa.sa_sigaction = sigtrap_handler;
     sigaction(SIGTRAP, &sa, NULL);
-    jit_log("SIGTRAP safety handler installed");
+    jit_log("SIGTRAP handler installed (no debugger)");
 }
 
 // iOS 26 BRK-based JIT syscalls.

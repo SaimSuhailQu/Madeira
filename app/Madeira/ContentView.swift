@@ -3,7 +3,6 @@ import UIKit
 import QuartzCore
 import Metal
 import os.log
-import UniformTypeIdentifiers
 
 // 2026-07-03 window-hosted Metal layer.
 //
@@ -466,7 +465,6 @@ final class JoystickPadState: ObservableObject {
     /// of this class), so the row's .transition(.opacity) cannot reach it and it
     /// stayed visible while every other button faded. It has to fade itself.
     @Published var hidden = false
-    @Published var inFullscreen = false
 }
 
 /// Window-level host for the pad. Transparent and non-interactive: the
@@ -543,8 +541,8 @@ struct JoystickPadOverlay: View {
         // sit under the game strip instead of centred on the button.
         .ignoresSafeArea()
         .allowsHitTesting(false)
-        .opacity((s.hidden || s.inFullscreen) ? 0 : 1)
-        .animation(.easeInOut(duration: 0.28), value: s.hidden || s.inFullscreen)
+        .opacity(s.hidden ? 0 : 1)
+        .animation(.easeInOut(duration: 0.28), value: s.hidden)
         .animation(.spring(response: 0.32, dampingFraction: 0.62), value: s.held)
         .animation(.spring(response: 0.22, dampingFraction: 0.58), value: s.dir)
     }
@@ -569,8 +567,12 @@ struct JoystickFace: View {
     private var padRadius: CGFloat { Self.padRadius }
     private let knobTravelRatio: CGFloat = 0.30
 
-    private var interior: some View {
-        GlassShape(circle: true)
+    @ViewBuilder private var interior: some View {
+        if #available(iOS 26.0, *) {
+            Circle().fill(.clear).glassEffect(.regular, in: Circle())
+        } else {
+            Circle().fill(.ultraThinMaterial)
+        }
     }
 
     private func knobOffset(_ d: CGFloat) -> CGSize {
@@ -715,7 +717,6 @@ struct JoystickKeyView: View {
                         }
                     }
             )
-            .opacity(JoystickPadState.shared.inFullscreen ? 0 : 1)
     }
 }
 
@@ -843,306 +844,16 @@ struct MadeiraMetalView: UIViewRepresentable {
     func updateUIView(_ uiView: MetalBackedView, context: Context) {}
 }
 
-/// Animated neon-rainbow title view for portrait and landscape with black controller badge and PS5 styling
-struct AnimatedNeonRainbowTitle: View {
-    var size: CGFloat = 20
-    @State private var phase: CGFloat = 0
-
-    var body: some View {
-        HStack(spacing: 8) {
-            // Sleek black badge with PS5 / DualSense controller & PlayStation symbols
-            ZStack {
-                Circle()
-                    .fill(Color.black)
-                    .frame(width: size * 1.5, height: size * 1.5)
-                    .overlay(
-                        Circle()
-                            .stroke(
-                                LinearGradient(
-                                    colors: [.cyan, .purple, .pink, .blue, .cyan],
-                                    startPoint: UnitPoint(x: phase - 1, y: 0),
-                                    endPoint: UnitPoint(x: phase, y: 1)
-                                ),
-                                lineWidth: 1.5
-                            )
-                    )
-                    .shadow(color: .cyan.opacity(0.6), radius: 4, x: 0, y: 0)
-
-                Image(systemName: "gamecontroller.fill")
-                    .font(.system(size: size * 0.85, weight: .bold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.pink, .purple, .cyan, .green, .yellow, .orange, .pink],
-                            startPoint: UnitPoint(x: phase - 1, y: 0),
-                            endPoint: UnitPoint(x: phase, y: 1)
-                        )
-                    )
-                    .shadow(color: .cyan.opacity(0.8), radius: 5, x: 0, y: 0)
-
-                // PS5 glyph indicator overlay
-                Text("PS5")
-                    .font(.system(size: size * 0.32, weight: .black, design: .rounded))
-                    .foregroundColor(.white)
-                    .offset(x: size * 0.42, y: size * 0.42)
-                    .shadow(color: .blue, radius: 2)
-            }
-
-            Text("Madeira")
-                .font(.system(size: size, weight: .heavy, design: .rounded))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .red],
-                        startPoint: UnitPoint(x: phase - 1, y: 0),
-                        endPoint: UnitPoint(x: phase, y: 1)
-                    )
-                )
-                .shadow(color: .purple.opacity(0.8), radius: 8, x: 0, y: 0)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(
-            Capsule()
-                .fill(Color.black.opacity(0.85))
-                .overlay(
-                    Capsule()
-                        .stroke(
-                            LinearGradient(
-                                colors: [.purple.opacity(0.6), .cyan.opacity(0.6), .pink.opacity(0.6)],
-                                startPoint: UnitPoint(x: phase - 1, y: 0),
-                                endPoint: UnitPoint(x: phase, y: 1)
-                            ),
-                            lineWidth: 1
-                        )
-                )
-                .shadow(color: .black.opacity(0.5), radius: 6, x: 0, y: 2)
-        )
-        .onAppear {
-            withAnimation(.linear(duration: 4.0).repeatForever(autoreverses: false)) {
-                phase = 2.0
-            }
-        }
-    }
-}
-
-/// Revamped controller setup sheet with simple On/Off toggle, live input tester, and virtual gamepad settings
-struct ControllerSetupSheet: View {
-    @ObservedObject var manager = GameControllerManager.shared
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Controller Setup") {
-                    Toggle("Enable Game Controllers", isOn: $manager.isEnabled)
-                        .tint(.green)
-
-                    HStack {
-                        Text("Connected Controllers")
-                        Spacer()
-                        Text("\(manager.connectedControllersCount)")
-                            .foregroundColor(.secondary)
-                    }
-
-                    if let name = manager.activeControllerName {
-                        HStack {
-                            Text("Active Device")
-                            Spacer()
-                            Text(name)
-                                .foregroundColor(.primary)
-                        }
-                    } else {
-                        HStack {
-                            Text("Status")
-                            Spacer()
-                            Text(manager.isEnabled ? "Scanning / Retrying..." : "Disabled")
-                                .foregroundColor(manager.isEnabled ? .orange : .secondary)
-                        }
-                    }
-
-                    Button("Scan & Retry Detection") {
-                        manager.refreshControllers()
-                    }
-                    .disabled(!manager.isEnabled)
-                }
-
-                Section("Virtual Gamepad") {
-                    Toggle("Persistent Virtual Gamepad", isOn: $manager.virtualGamepadEnabled)
-                        .tint(.blue)
-                    Text("Keeps the in-game virtual controller active so reconnected controllers immediately regain control without reopening games.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Section("Live Input Tester (DualSense / Xbox / MFi)") {
-                    HStack {
-                        Text("Last Action")
-                        Spacer()
-                        Text(manager.lastPressedButton)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundColor(.green)
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Left Stick (WASD): \(String(format: "X: %.2f, Y: %.2f", manager.leftStickValues.x, manager.leftStickValues.y))")
-                            .font(.caption)
-                        Text("Right Stick (Look): \(String(format: "X: %.2f, Y: %.2f", manager.rightStickValues.x, manager.rightStickValues.y))")
-                            .font(.caption)
-                        Text("Triggers (LT/RT): \(String(format: "LT: %.2f, RT: %.2f", manager.triggerValues.0, manager.triggerValues.1))")
-                            .font(.caption)
-                    }
-                    .foregroundColor(.secondary)
-                }
-            }
-            .navigationTitle("Controller Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-    }
-}
-
-/// Phone & System Optimization, JIT Pool Size, and Wine Desktop Resolution settings sheet
-struct PhoneSettingsSheet: View {
-    @Binding var selectedRes: String
-    @Binding var jitPoolMB: Int
-    @Binding var phoneOptimization: Bool
-    @Binding var wow64Support: Bool
-    @Environment(\.dismiss) private var dismiss
-
-    let resOptions = [
-        ("Native Screen (Auto / Full)", "native"),
-        ("1920 x 1080 (1080p FHD)", "1920x1080"),
-        ("1600 x 900 (900p HD+)", "1600x900"),
-        ("1280 x 720 (720p HD)", "1280x720"),
-        ("1024 x 768 (4:3 Standard)", "1024x768"),
-        ("960 x 540 (qHD / Recommended)", "960x540"),
-        ("800 x 600 (SVGA Classic)", "800x600")
-    ]
-
-    let poolOptions: [(String, Int)] = [
-        ("256 MB (Ultra-Light / Safe for 4GB Devices)", 256),
-        ("384 MB (Recommended for iPhone XS / 11 / 12)", 384),
-        ("512 MB (Balanced)", 512),
-        ("640 MB (Medium Games)", 640),
-        ("896 MB (Large / Steam CEF Default)", 896),
-        ("1024 MB (Maximum - Pro/iPad Devices Only)", 1024)
-    ]
-
-    /// ml777: whether this bundle ships the optional i386 (WoW64) PE set.
-    private var i386SetPresent: Bool {
-        FileManager.default.fileExists(
-            atPath: Bundle.main.bundlePath + "/i386-windows")
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section(header: Text("Device & Memory Optimization"),
-                        footer: Text("Optimizes memory and background buffers to avoid iOS Jetsam crash-to-home-screen on phones with 4GB RAM.")) {
-                    Toggle("Phone Hardware Optimization", isOn: $phoneOptimization)
-                        .tint(.green)
-                }
-
-                // ml777: 32-bit (WoW64) games & apps, including the real
-                // 32-bit Steam client. Gated on the optional i386-windows PE
-                // set: when the bundle lacks it, the toggle still shows but
-                // the footer explains what to build.
-                Section(header: Text("32-bit Games & Apps"),
-                        footer: Text(i386SetPresent
-                            ? "Run 32-bit x86 games, apps and the real Steam client through the WoW64 session (MADEIRA_WOW64=1)."
-                            : "Requires the i386-windows PE set, which is not in this build. Rebuild the IPA with MADEIRA_BUILD_I386=1 (see BUILDING.md). Until then, 32-bit launches fall back with a log and Steam needs a 64-bit archive.")) {
-                    Toggle("32-bit Support (WoW64)", isOn: $wow64Support)
-                        .tint(.blue)
-                }
-
-                Section(header: Text("JIT Pool Size"),
-                    footer: Text("Madeira uses the largest selected pool on 6GB+ devices. 4GB-class devices are automatically limited to 384MB to reduce iOS termination risk.")) {
-                    ForEach(poolOptions, id: \.1) { label, mb in
-                        HStack {
-                            Text(label)
-                                .font(.system(size: 14))
-                            Spacer()
-                            if jitPoolMB == mb {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(.blue)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            jitPoolMB = mb
-                            // Persist to Documents/madeira-pool.txt as well
-                            if let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
-                                try? "\(mb)".write(to: d.appendingPathComponent("madeira-pool.txt"), atomically: true, encoding: .utf8)
-                            }
-                        }
-                    }
-                }
-
-                Section(header: Text("Wine Desktop Resolution"),
-                        footer: Text("Resolution changes apply to the next Wine desktop launch. Madeira itself can stay open.")) {
-                    ForEach(resOptions, id: \.1) { label, value in
-                        HStack {
-                            Text(label)
-                            Spacer()
-                            if selectedRes == value {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(.blue)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedRes = value
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Phone & Display Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-    }
-}
-
 struct ContentView: View {
-    private enum MadeiraTheme {
-        static let canvas = Color(red: 0.055, green: 0.063, blue: 0.078)
-        static let panel = Color(red: 0.090, green: 0.102, blue: 0.125)
-        static let accent = Color(red: 0.98, green: 0.42, blue: 0.20)
-        static let divider = Color.white.opacity(0.10)
-    }
-
     @StateObject private var logStore = LogStore.shared
-    @StateObject private var gameControllerManager = GameControllerManager.shared
     @State private var jitStatus: JITStatus = .unknown
     @State private var entitlements: EntitlementStatus?
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
     @State private var pointerPanel = false
     @Namespace private var pointerNS
-    @State private var isFileImporterPresented = false
-    @State private var isResolutionSheetPresented = false
-    @State private var isControllerSheetPresented = false
-    @AppStorage("wine_desktop_res") private var selectedResolution: String = "960x540"
-    @AppStorage("jit_pool_mb") private var jitPoolMB: Int = 1024 // Use the device maximum; 4GB devices are clamped below.
-    @AppStorage("phone_optimization") private var phoneOptimization: Bool = true
-    /// ml777: 32-bit (WoW64) games & apps. Launches of i386 PEs run through
-    /// the WoW64 session when the optional i386-windows PE set is present in
-    /// the bundle; otherwise they fall back with a clear log (never a crash).
-    @AppStorage("wow64_support") private var wow64Support: Bool = true
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
     @Environment(\.verticalSizeClass) private var vSizeClass
-    @Environment(\.horizontalSizeClass) private var hSizeClass
-
-    @State private var showJITAlert = false
-    @State private var showBadPoolAlert = false
-    @State private var wineLaunchInProgress = false
 
     enum JITStatus {
         case unknown
@@ -1162,90 +873,23 @@ struct ContentView: View {
          * two-column selection behaviour. */
         NavigationStack {
             Group {
-                if hSizeClass == .regular {
-                    iPadBody
-                } else if vSizeClass == .compact {
+                if vSizeClass == .compact {
                     landscapeBody
                 } else {
                     portraitBody
                 }
             }
-            .tint(MadeiraTheme.accent)
-            .background(MadeiraTheme.canvas)
             // Rotation destroys/recreates the UIViewRepresentable across
             // this if/else (two SwiftUI identities) — HARMLESS since
             // 2026-07-05: MetalHostView is a process-lifetime singleton;
             // a fresh placeholder only re-parents the same CAMetalLayer.
-            // Animated neon-rainbow title in portrait
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    AnimatedNeonRainbowTitle(size: 20)
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack(spacing: 12) {
-                        Button {
-                            isControllerSheetPresented = true
-                        } label: {
-                            Image(systemName: "gamecontroller")
-                                .font(.system(size: 16, weight: .semibold))
-                        }
-
-                        Button {
-                            isResolutionSheetPresented = true
-                        } label: {
-                            Image(systemName: "gearshape")
-                                .font(.system(size: 16, weight: .semibold))
-                        }
-                    }
-                }
-            }
+            .navigationTitle("Madeira")
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(vSizeClass == .compact)
-            .sheet(isPresented: $isControllerSheetPresented) {
-                ControllerSetupSheet()
-            }
-            .sheet(isPresented: $isResolutionSheetPresented) {
-                PhoneSettingsSheet(
-                    selectedRes: $selectedResolution,
-                    jitPoolMB: $jitPoolMB,
-                    phoneOptimization: $phoneOptimization,
-                    wow64Support: $wow64Support
-                )
-            }
-            .alert("JIT Not Enabled", isPresented: $showJITAlert) {
-                Button("Enable JIT via StikDebug") {
-                    enableJITViaStikDebug()
-                }
-                Button("Cancel", role: .cancel) { }
-            } message: {
-                Text("Wine emulation strictly requires JIT compilation. Please tap 'Enable JIT' or attach a debugger via SideStore / AltStore / StikDebug first.")
-            }
-            .alert("JIT Memory Pool Placement", isPresented: $showBadPoolAlert) {
-                Button("Open Settings") {
-                    isResolutionSheetPresented = true
-                }
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text("Unable to allocate the requested JIT memory pool at the selected size. Try selecting 256MB or 384MB in Phone Settings (⚙️).")
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MadeiraBadPoolNotification"))) { _ in
-                showBadPoolAlert = true
-            }
             .onAppear {
                 jit_install_trap_handler()
                 entitlements = EntitlementStatus.check()
                 logEntitlementStatus()
-            }
-            .fileImporter(
-                isPresented: $isFileImporterPresented,
-                allowedContentTypes: [.item],
-                allowsMultipleSelection: false
-            ) { result in
-                // Delay execution to allow the file picker to dismiss before the JIT allocation
-                // BRK instruction suspends the entire process, which would otherwise freeze the UI.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    handleImportedFile(result)
-                }
             }
         }
     }
@@ -1313,12 +957,9 @@ struct ContentView: View {
             .zIndex(10)
             Divider()
             actionButtons
-                .background(MadeiraTheme.panel)
-            Divider().overlay(MadeiraTheme.divider)
+            Divider()
             logConsole
-                .background(MadeiraTheme.canvas)
         }
-        .background(MadeiraTheme.canvas)
     }
 
     /// Landscape: game mode. Full-height 4:3 surface centered (aspect-fit
@@ -1332,15 +973,11 @@ struct ContentView: View {
             ZStack {
                 Color.black
                 MadeiraMetalView()
-                // Animated neon-rainbow title and FPS readout in landscape pillarbox bars
+                // Controls removed for now (ml586): game-only landscape.
+                // The FPS readout stays, pinned in the right pillarbox bar —
+                // the window-level surface covers anything drawn over the
+                // game area itself, so it cannot ride on the game view.
                 HStack(spacing: 0) {
-                    VStack(alignment: .leading) {
-                        AnimatedNeonRainbowTitle(size: 13)
-                            .padding(.leading, 8)
-                            .padding(.top, 8)
-                        Spacer()
-                    }
-                    .frame(width: barW, alignment: .leading)
                     Spacer(minLength: 0)
                     VStack {
                         FPSOverlay(compact: true)
@@ -1352,42 +989,6 @@ struct ContentView: View {
         }
         .ignoresSafeArea()
         .background(Color.black)
-    }
-
-    private var iPadBody: some View {
-        GeometryReader { geo in
-            HStack(spacing: 0) {
-                VStack(spacing: 0) {
-                    if let ents = entitlements {
-                        entitlementBadges(ents)
-                    }
-                    HStack(spacing: 6) {
-                        FPSOverlay()
-                        Spacer()
-                    }
-                    .padding(.horizontal, 12)
-                    MadeiraMetalView()
-                        .aspectRatio(4.0 / 3.0, contentMode: .fit)
-                        .frame(maxWidth: .infinity, maxHeight: max(CGFloat(260), geo.size.height * 0.48))
-                        .background(Color.black)
-                    actionButtons
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                Divider().overlay(MadeiraTheme.divider)
-
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Wine Log")
-                        .font(.headline)
-                        .padding(.horizontal, 12)
-                        .padding(.top, 12)
-                    logConsole
-                }
-                .frame(width: min(max(geo.size.width * 0.32, 300), 460))
-            }
-        }
-        .background(MadeiraTheme.canvas)
     }
 
     /// Hold-to-press key: VK down on touch, VK up on release — for keys
@@ -1482,25 +1083,21 @@ struct ContentView: View {
             entitlementBadge("JIT", granted: debuggerAttached)
             entitlementBadge("Memory+", granted: ents.increasedMemory)
             entitlementBadge("64-bit VA", granted: ents.extendedVA)
-            if gameControllerManager.connectedControllersCount > 0 {
-                HStack(spacing: 4) {
-                    Image(systemName: "gamecontroller.fill")
-                        .foregroundColor(.green)
-                    Text(gameControllerManager.activeControllerName ?? "Controller")
-                        .font(.caption2)
-                        .foregroundColor(.primary)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.green.opacity(0.15))
-                .cornerRadius(4)
-            }
             Spacer()
+            // Device model rides in this row (the old standalone statusHeader
+            // row above it spent ~50pt of vertical space on nothing else).
+            VStack(alignment: .trailing, spacing: 0) {
+                Text("Device")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Text(deviceInfo)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
         }
         .padding(.horizontal)
         .padding(.top, 4)
         .padding(.bottom, 8)
-        .background(MadeiraTheme.panel)
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             debuggerAttached = isDebuggerAttached()
         }
@@ -1536,24 +1133,142 @@ struct ContentView: View {
 
     private var actionButtons: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 Button("Enable JIT") {
                     enableJITViaStikDebug()
                 }
                 .buttonStyle(.borderedProminent)
 
                 Button("Steam Testing") {
-                    guard jit_check_debugged() else {
-                        logStore.log("Steam Testing requires JIT. Tap 'Enable JIT' first.", level: .error)
-                        showJITAlert = true
-                        return
-                    }
+                    // Steam S3 first boot: virtual desktop (Steam needs a
+                    // window manager) + services.exe (SCM → rpcss for Steam's
+                    // COM, the chain proven in the rpcss milestone) + steam.exe
+                    // itself, all launched by C:\steam-launch.bat (pushed to
+                    // the prefix). Batch avoids quote-escaping hell; combase's
+                    // 5s OpenSCManager retry covers the services-vs-steam race.
+                    // Steam install = CrossOver copy at C:\Program Files (x86)\
+                    // Steam (all boot binaries verified x86-64; steamwebhelper
+                    // /libcef = 209MB → watch pool: first webhelper may fit,
+                    // multiples need .text sharing). Flags: -no-cef-sandbox
+                    // (sandbox can't work in Wine), -cef-disable-gpu (software
+                    // render), -console (Steam's own log → our stderr). Steam
+                    // WILL try to self-update through our GnuTLS stack — that
+                    // attempt is itself an informative S0 re-test.
                     let deskW = 1024, deskH = 768
+                    // ml589: find Steam and (re)write the launch batch. Returns
+                    // false — having logged why — when there is nothing to run.
                     guard prepareSteamLaunch() else { return }
+                    // ml590 STEP 1 (one-run phase check, NOT a timing measurement):
+                    // arm the ml578 sock-wire probe. It answers exactly one
+                    // question — does today's ~1s CM failure reach the same TLS
+                    // phase ml578 did (ServerHello -> client Finished -> server
+                    // encrypted records), or does it die earlier?
+                    //
+                    // Its numbers are NOT trustworthy as timings: no monotonic
+                    // clock, a getpeername() before EVERY send/recv even after the
+                    // 12-line budget is spent, and synchronous dprintf() on a path
+                    // whose whole ping budget is 1000ms — it perturbs what it
+                    // measures, which is why ml579 gated it off. Step 2 replaces it
+                    // with a per-socket timeline (cached peer, generation counter,
+                    // one line at close) that can be trusted for timing.
+                    //
+                    // COLD LAUNCH REQUIRED: ios_sock_wire() latches this env into a
+                    // static on its FIRST call (socket.c:842), so if any earlier
+                    // Wine session in this app process already touched a socket the
+                    // flag is stuck off. Force-quit, launch, press this first.
+                    // ml591: the phase question is ANSWERED, so the per-event
+                    // probe goes back off — it distorts the very budget step 2
+                    // measures. [sock-tl] replaces it and needs no env var.
                     unsetenv("MADEIRA_SOCK_WIRE")
+                    // ml594 A/B: post-login hang = FEX optimizer NONTERMINATION.
+                    // Chrome_InProcRendererThread (wtid 0208) sampled 9x at
+                    // 97-100% CPU (cpu=277 -> 918, run=1) inside
+                    // DeadFlagCalculationEliminination::ProcessBlock while EVERY
+                    // other thread sat at cpu=0 and Steam presented ZERO further
+                    // frames. One CompileBlock entered that pass and never came
+                    // back, and the thread holds a fexlock read ref, so it can
+                    // stall other FEX threads too. NOT a network/cryptnet/wineserver
+                    // wait — our new guards never fired.
+                    //
+                    // FEX_O0 disables the default x87 + dead-flag passes
+                    // (FEXCore/Source/Interface/IR/PassManager.cpp:70). Slower, but
+                    // if the hang disappears the pass is convicted and the next step
+                    // is disabling ONLY CreateDeadFlagCalculationEliminination().
+                    // ml596: FEX_O0 has NEVER ACTUALLY BEEN TESTED, and my earlier
+                    // comment here blaming it for an execute fault was WRONG.
+                    // ml595 died because the JIT pool never existed: all three
+                    // placement attempts returned 0x7000000000 (the forbidden guest
+                    // 64G window), we logged "continuing without it", and Wine then
+                    // ran with `pool not initialised` -- so LdrInitializeThunk stayed
+                    // at its PE address 0x71ffd77654 instead of being redirected into
+                    // the pool (a healthy run logs `redirected PC 0x71ffd77654 ->
+                    // 0x12078f654`). The execute fault was the guaranteed consequence
+                    // of launching without the execution substrate, and pool placement
+                    // happens HERE in Swift before FEX reads any env var -- FEX_O0
+                    // cannot influence it. (Caught by Sol.)
+                    //
+                    // Convict the dead-flag pass with a targeted FEX build that
+                    // disables ONLY CreateDeadFlagCalculationEliminination(); broad O0
+                    // also drops the x87 pass and proves less. unsetenv keeps a stale
+                    // value from a previous launch out of play.
                     unsetenv("FEX_O0")
+                    // ml597 A/B: remove ONLY DeadFlagCalculationEliminination, the pass
+                    // the renderer thread was pinned inside during the ml594 hang.
+                    // Everything else in the pipeline (incl. x87) stays exactly as in a
+                    // known-good run, so a result here implicates or clears this one pass.
+                    // The [dfe-guard] bounds ship active in BOTH arms — if the pass is
+                    // exonerated and the hang recurs, they still name the failure mode.
+                    // ml598 ISOLATION RUN: gate OFF, same rebuilt FEX.
+                    // ml597 crashed with c000001d (ILLEGAL INSTRUCTION) after the
+                    // desktop came up, but that run changed TWO things at once: my
+                    // DFE gate AND ~107 lines of FEX source committed today that had
+                    // never been built — the shipped xtajit64.dll dated Aug 6 while
+                    // Core.cpp/IosJitAlias.cpp/TSOHandlerConfig.h and a net rewrite of
+                    // WinAPI/IO.cpp were newer. Any of those can produce a
+                    // miscompilation-shaped fault, so ml597 convicts nothing.
+                    //   crashes again -> the REBUILD is at fault, DFE still untested
+                    //   runs fine     -> disabling DFE is what breaks it
                     unsetenv("MADEIRA_NO_DFE")
+                    // ml599: name the pass that corrupts the IR list.
+                    //
+                    // ml598 settled the mechanism: FEX hangs walking a block
+                    // BACKWARDS because the intrusive Previous chain never reaches
+                    // CodeBegin. Two passes make that assumption —
+                    // DeadFlagCalculationEliminination::ProcessBlock and
+                    // ConstrainedRAPass::Run — and the store-page freeze was the
+                    // second one (PC pinned inside libarm64ecfex.dll RVA
+                    // 0x100b0c-0x100cdc, all within ConstrainedRAPass::Run, for
+                    // minutes at ~100% CPU while frames stayed at 4,114).
+                    //
+                    // Both now validate the block BEFORE touching it and repair the
+                    // Previous chain from the forward chain when that is intact, so
+                    // the hang should be gone either way. This var adds the sweep
+                    // that reports WHICH pass first breaks the list, so the run also
+                    // produces the root cause and not just the containment.
+                    // ml601: SWEEP OFF. Two runs checked 118M and 47M blocks and found
+                    // corruption exactly once (block 260, ml599b) — the after-every-pass
+                    // sweep is not earning its cost, and it taxes every large compile.
+                    // The unconditional parts STAY ON regardless of this variable: the
+                    // cheap backward check at DFE and RA entry, the repair, and the
+                    // bounded-walk guards. Only the attribution sweep is disabled.
+                    // Set it again for a run that is specifically hunting the corrupter.
                     unsetenv("MADEIRA_IR_TOPO")
+                    // ml623: TARGETED IR/RA CAPTURE for the ULTRAKILL Mono wall.
+                    //
+                    // FEX miscompiles ONE instruction in Mono's x86-64 emitter:
+                    //   mono-2.0-bdwgc.dll+0x4db25b   mov byte ptr [rcx+2], al
+                    // With RCX=0x7040140010 (valid, a fresh RWX code buffer) and AL=0x4c,
+                    // it emitted `movz w6,#0x44 ; orr x8,x8,x6 ; dmb ish ; strb w8,[x6,xzr]`
+                    // -- the address register still held the IMMEDIATE because the
+                    // `add x6, x0, #2` that BOTH sibling branches emit was never generated,
+                    // so the store landed on 0x44.
+                    //
+                    // This prints that instruction's IR after the frontend and after every
+                    // pass, plus the emitted host bytes. The last stage at which the address
+                    // computation still exists names the culprit: frontend/decoder, a named
+                    // pass, RA liveness, or the ARM emitter.
+                    //
+                    // Compile-time only, capped at 4 captures. Unset it for a normal run.
                     setenv("MADEIRA_IRCAP_RVA", "0x4db25b", 1)
                     setenv("MADEIRA_IRCAP_MODULE", "mono-2.0-bdwgc.dll", 1)
                     setenv("MADEIRA_EXE", "explorer.exe", 1)
@@ -1562,38 +1277,159 @@ struct ContentView: View {
                     setenv("MADEIRA_DESKTOP", "1", 1)
                     setenv("MADEIRA_SCREEN_W", String(deskW), 1)
                     setenv("MADEIRA_SCREEN_H", String(deskH), 1)
+                    // ml371: surfdump ground truth — the "frozen desktop"
+                    // question (fresh pixels never presented vs nothing
+                    // painting upstream) is undecidable from the log alone
+                    // because the [winios] present line caps at 12.
+                    // ml556: surface PNG dumping also off for the clean baseline —
+                    // it encodes a PNG on the present path. Restore "1" to re-enable.
                     unsetenv("MADEIRA_DUMP_SURFACES")
+                    // ml493: bursts of N CONSECUTIVE frames per window. The
+                    // login window's black regions change every frame, which
+                    // the 2s-throttled first/latest dump can never show —
+                    // adjacent frames are the only way to measure what moves.
                     setenv("MADEIRA_SURF_SEQ", "10", 1)
+                    // ml515: SRCWATCH RE-ENABLED, now hooked in the MACH
+                    // exception handler (where guest faults are actually
+                    // delivered) instead of segv_handler. It consumes its own
+                    // faults BEFORE every other classification and marks them
+                    // handled via the canonical thread_set_state path, so a
+                    // protection fault can no longer reach the guest as an AV.
+                    // ml514 hooked the wrong path: 0 faults, black window 2/2.
+                    /* ml530 (#78): srcwatch subject = the assembled steamui JS buffer, not the
+                     // render bitmap. "1" would mean the legacy render subject, and the
+                     // watch arms only ONCE — so with both call sites live, whichever ran
+                     // first would silently win and the other would never arm at all.
+                     //
+                     // Target: V8 reports `SyntaxError: Invalid or unexpected token` on
+                     // steamui JS that our file reads deliver byte-perfect (ml489: 73/73
+                     // MATCH, the failing file 100% verified through NtReadFile). That is
+                     // the DOMINANT Steam variance — 27 of 45 attempts stall right after
+                     // BrowserReady because the UI script never parses — and the same
+                     // corrupter family as the render glitch, so it buys both. */
+                    /* ml533: back to the RENDER subject — the js subject is structurally
+                    // blocked (the failing steamui files are read through a reused 64KB
+                    // chunk buffer, so no assembled buffer exists in our view). The render
+                    // watch now names the CALLER via the guest return address at [RSP],
+                    // which is what the block-granular RIP could never do. */
+                    // ml556 CLEAN-BASELINE TEST: srcwatch OFF.
+                    //
+                    // It write-protects the render bitmap and takes a Mach fault
+                    // per page ON THE RENDER HOT PATH, and the correlation across
+                    // this session is stark:
+                    //     attributions 1824/2370/426/2721 -> run dies at 36-52 s
+                    //     attributions 0/0/0              -> run reaches 94-106 s
+                    // Runs carrying our instrumentation die in roughly half the
+                    // time. Before attributing the crash to Steam or to FEX we owe
+                    // ourselves the one-variable control: does it still crash with
+                    // the probe off? Re-enable by restoring "render".
+                    // ml574: arm the dead-release detector in wineserver.
+                    // O(n) walk of object_list on every release_object — slow by
+                    // design, diagnostic only. Set to "0" to disarm.
+                    // ml579: DISABLED. It walks the global wineserver object list on
+                    // EVERY release_object() — O(n) in the single-threaded server. It
+                    // already caught the free_async_queue over-release (ml574) and that
+                    // fix is shipped; leaving the detector armed just starves the server,
+                    // and Steam allows each CM ping only 1000 ms. Set to "1" to re-arm.
                     setenv("MADEIRA_DEAD_RELEASE", "0", 1)
                     setenv("MADEIRA_SRCWATCH", "off", 1)
+                    // ml548: restrict srcwatch to the row band where displacement
+                    // was actually MEASURED, so the 400-attribution budget is not
+                    // spent on the full-frame clear (which touches every page
+                    // first and made the content painters invisible in ml517).
+                    // Band from ml543 frame 009: the Steam logo core landed at
+                    // (96,188) instead of (350,188) — exactly -254 px, one tile
+                    // pitch — so rows 150..230 bracket the displaced element.
+                    // ml550: was "150,230" — chosen for the SPLASH logo. On a
+                    // login-window run that band produced ZERO attributions
+                    // (426 on the splash run), because nothing painted there.
+                    // Widen to most of the surface so the watch follows whatever
+                    // the frame actually draws; the per-page budget still bounds
+                    // the fault cost.
                     setenv("MADEIRA_SRCWATCH_ROWS", "0,400", 1)
+                    // ml527 (#82 RETEST, ONE VARIABLE): run V8 with its JIT on.
+                    //
+                    // ml526's phase timeline made the case concrete — of ~39s to
+                    // the login window, the single biggest block is 13.0s of
+                    // BrowserReady -> GetDesiredSteamUIWindows, i.e. Steam's UI
+                    // JavaScript booting, and interpreted V8 costs 5-20x there.
+                    //
+                    // #82 convicted jitless-off because both trial runs parked
+                    // CrBrowserMain shortly after BrowserReady (ml474b +104s,
+                    // ml475 +4s). ⚠️ Both ran with StikDebug attached and
+                    // spinning, when every trap was a round-trip to a starved
+                    // debugger — the overhead that made webhelper bring-up 89s
+                    // instead of 9s (b439be6). V8's JIT emits runtime x86, the
+                    // heaviest trap/compile workload in the process, so it is
+                    // exactly what that overhead punished worst. The verdict may
+                    // not survive early detach.
+                    //
+                    // ⛔ VERDICT (ml527, 2 runs): #82 SURVIVES early detach — jitless
+                    // stays ON. Both jitless-off runs died in the SAME window ml474b
+                    // and ml475 died in: right after BrowserReady, before
+                    // GetDesiredSteamUIWindows was ever reached (13:20:19 and
+                    // 13:22:45), so 4/4 across two completely different debugger
+                    // regimes. The failure MODE changed — a c0000005 ->
+                    // chrome_elf.dll+0xd4153 -> ffff7001 Crashpad termination rather
+                    // than #82's park in NtWaitForAlertByThreadId — but the window is
+                    // identical, and jitless-ON reaches the login window repeatedly
+                    // through that same window.
+                    //
+                    // No consolation prize either: BrowserReady took 12s and 10s with
+                    // the JIT on vs 8-11s (median 9s) with it off, because V8's JIT
+                    // emits runtime x86 that FEX must then compile. So the debugger
+                    // overhead was NOT what convicted jitless-off, and the 13s of
+                    // Steam UI JavaScript stays unmeasured — neither run survived to
+                    // reach it.
+                    //
+                    // Flip to "0" only alongside a fix for the post-BrowserReady death.
+                    setenv("MADEIRA_JITLESS", "1", 1)
+                    // ml514 note (kept for the record): The ml514 watch
+                    // armed correctly (76 pages protected) but logged ZERO
+                    // faults and produced an all-black window on two runs: the
+                    // hook went in the BSD segv_handler, while guest faults in
+                    // this port are handled IN-MACH by the exception server, so
+                    // the protection fault was delivered to the guest as an AV
+                    // and killed Chromium's paint. A probe must never break the
+                    // path it measures. To revive it, hook the Mach exception
+                    // server (where ios_emulate_unaligned_guest_access already
+                    // runs), not segv_handler, and re-enable this env var.
+                    // ml502 sentinel: DELIBERATELY NOT ENABLED. It stamps
+                    // magenta into currently-black pixels, and on windows
+                    // Chromium does not fully rewrite it SURVIVES and reaches
+                    // the screen (console 0x200bc hit untouched=177891 in one
+                    // round). It answered its question in ml503/ml504 —
+                    // untouched=0 on the login window proved Chromium writes
+                    // every pixel — so it must not ship enabled. Re-enable
+                    // with MADEIRA_SURF_SENTINEL=1 if the question returns.
                     runWineFullSequence()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
 
                 Button("Wine Virtual Desktop") {
-                    guard jit_check_debugged() else {
-                        logStore.log("Wine Virtual Desktop requires JIT. Tap 'Enable JIT' first.", level: .error)
-                        showJITAlert = true
-                        return
-                    }
-                    var deskW = 960
-                    var deskH = 540
-                    if selectedResolution == "native" {
-                        let b = UIScreen.main.nativeBounds
-                        deskW = Int(max(b.width, b.height))
-                        deskH = Int(min(b.width, b.height))
-                    } else {
-                        let parts = selectedResolution.split(separator: "x")
-                        if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]) {
-                            deskW = w
-                            deskH = h
-                        }
-                    }
+                    // S3-pre R2v2: raw rpcss.exe CANNOT run standalone —
+                    // its wmain unconditionally StartServiceCtrlDispatcherW's
+                    // (rpcss_main.c:282), which RPCs back to the SCM; without
+                    // services.exe it raised + wedged in
+                    // service_run_main_thread, and explorer's
+                    // CoRegisterClassObject wedged behind it (seq-3680 run).
+                    // Proper bootstrap: explorer's cmdline child = services.exe
+                    // (SCM host, windows-subsystem = no console). It creates
+                    // \pipe\svcctl early, runs auto-start services (MountMgr/
+                    // Eventlog/NDIS/nsiproxy/PlugPlay — winedevice/plugplay
+                    // are bundled; failures tolerated), and combase's
+                    // start_rpcss then demand-starts RpcSs through the SCM
+                    // with a 30s start-pending wait → rpcss runs as services'
+                    // child (3-deep tree, proven depth) with a proper
+                    // dispatcher connection → epmapper up → real COM.
+                    // Known risk: if shellwindows_init beats services.exe's
+                    // RPC_Init, OpenSCManager fails → watch whether that
+                    // fails fast or hits the RaiseException→CS wedge again.
+                    let deskW = 960, deskH = 540
                     setenv("MADEIRA_EXE", "explorer.exe", 1)
                     setenv("MADEIRA_ARGS",
-                           "/desktop=shell,\(deskW)x\(deskH)", 1)
+                           "/desktop=shell,\(deskW)x\(deskH) C:\\windows\\system32\\services.exe", 1)
                     setenv("MADEIRA_DESKTOP", "1", 1)
                     setenv("MADEIRA_SCREEN_W", String(deskW), 1)
                     setenv("MADEIRA_SCREEN_H", String(deskH), 1)
@@ -1602,23 +1438,17 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.mint)
 
-                Button("Install / Run EXE") {
-                    guard jit_check_debugged() else {
-                        logStore.log("Running Windows executables requires JIT. Tap 'Enable JIT' first.", level: .error)
-                        showJITAlert = true
-                        return
-                    }
-                    isFileImporterPresented = true
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.indigo)
-
+                // ml741: Stray (UE4). Launch the shipping binary DIRECTLY rather
+                // than Stray.exe -- the launcher builds its child's command line
+                // itself and passed only "Hk_project", so Unreal picked its
+                // default RHI. That default is DX12 for this title and we only
+                // implement D3D11, which is why the first run sat on an
+                // unsignalled event for 97s at startup instead of failing loudly.
+                //
+                // Args are overridable at runtime from Documents/madeira-args.txt
+                // so UE4 flags can be tried without a rebuild; the string below is
+                // the default when that file is absent.
                 Button("Stray (UE4, -dx11)") {
-                    guard jit_check_debugged() else {
-                        logStore.log("Stray requires JIT. Tap 'Enable JIT' first.", level: .error)
-                        showJITAlert = true
-                        return
-                    }
                     setenv("MADEIRA_EXE",
                            "C:\\Program Files\\Stray\\Hk_project\\Binaries\\Win64\\Stray-Win64-Shipping.exe", 1)
                     var args = "Hk_project -dx11 -windowed"
@@ -1636,11 +1466,9 @@ struct ContentView: View {
                 .tint(.orange)
 
                 Button("Thumper (standalone)") {
-                    guard jit_check_debugged() else {
-                        logStore.log("Thumper requires JIT. Tap 'Enable JIT' first.", level: .error)
-                        showJITAlert = true
-                        return
-                    }
+                    // Game lives at Documents/wine/drive_c/Program Files/Thumper/
+                    // (push via scripts/deploy-thumper.sh during development;
+                    // bundled as resource for distribution later).
                     setenv("MADEIRA_EXE",
                            "C:\\Program Files\\Thumper\\THUMPER_win10.exe", 1)
                     unsetenv("MADEIRA_ARGS")
@@ -1651,11 +1479,6 @@ struct ContentView: View {
                 .tint(.pink)
 
                 Button("x64 DX11 cube") {
-                    guard jit_check_debugged() else {
-                        logStore.log("x64 DX11 cube requires JIT. Tap 'Enable JIT' first.", level: .error)
-                        showJITAlert = true
-                        return
-                    }
                     setenv("MADEIRA_EXE", "cube-x64.exe", 1)
                     unsetenv("MADEIRA_ARGS")
                     runWineFullSequence()
@@ -1663,12 +1486,14 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.purple)
 
+                // ml731c: one-second check of the Windows clock contract
+                // (GetTickCount64 / system time / unbiased interrupt time /
+                // QueryPerformanceCounter). Verifying this by hand previously
+                // cost a five-minute game run plus a control-log comparison,
+                // and the game is too unstable to serve as a measuring tool.
+                // Each clock is checked separately so a partial failure names
+                // itself: QPC passing alone is the shared-page signature.
                 Button("x64 clock test") {
-                    guard jit_check_debugged() else {
-                        logStore.log("Clock test requires JIT. Tap 'Enable JIT' first.", level: .error)
-                        showJITAlert = true
-                        return
-                    }
                     setenv("MADEIRA_EXE", "clocktest-x64.exe", 1)
                     unsetenv("MADEIRA_ARGS")
                     unsetenv("MADEIRA_DESKTOP")
@@ -1678,11 +1503,6 @@ struct ContentView: View {
                 .tint(.teal)
 
                 Button("arm64 DX11 cube") {
-                    guard jit_check_debugged() else {
-                        logStore.log("arm64 DX11 cube requires JIT. Tap 'Enable JIT' first.", level: .error)
-                        showJITAlert = true
-                        return
-                    }
                     runTriangleTest()
                 }
                 .buttonStyle(.borderedProminent)
@@ -1694,10 +1514,8 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .tint(.red)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding()
         }
-        .background(MadeiraTheme.panel)
     }
 
     private func runTriangleTest() {
@@ -1919,18 +1737,8 @@ struct ContentView: View {
     /// Debugger stays attached during PE loading so mprotect_exec can use BRK
     /// to prepare code pages. Detach happens after Wine finishes + recovery.
     private func runWineFullSequence() {
-        guard !wineLaunchInProgress else {
-            logStore.log("Wine launch already in progress; ignoring duplicate request.", level: .debug)
-            return
-        }
-        wineLaunchInProgress = true
-
         guard jit_check_debugged() else {
-            wineLaunchInProgress = false
             logStore.log("JIT not enabled. Press 'Enable JIT' first.", level: .error)
-            DispatchQueue.main.async {
-                self.showJITAlert = true
-            }
             return
         }
 
@@ -2041,39 +1849,13 @@ struct ContentView: View {
             // so it can be swapped between runs without a rebuild, and deleting
             // the file reverts to the proven default. Clamped to sane values --
             // a typo here would otherwise move the VA floor with it.
-            // JIT Pool Size is controlled via Phone Settings (default 384MB for phone stability)
-            var poolSizeMB = jitPoolMB
+            var poolSizeMB = 896
             if let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
                let txt = try? String(contentsOf: d.appendingPathComponent("madeira-pool.txt"), encoding: .utf8),
                let mb = Int(txt.trimmingCharacters(in: .whitespacesAndNewlines)),
                mb >= 256, mb <= 1152 {
                 poolSizeMB = mb
-            }
-            // ml777: 4GB-class devices (iPhone XS / XR / 11) jetsam far below
-            // the 6-8GB budgets the 512-1024MB Steam/CEF pool sizes were
-            // tuned against. Auto-clamp here so a stale madeira-pool.txt or
-            // an inherited setting can't kill the app on launch — the
-            // "closes the application" symptom on XS-class phones. A manual
-            // override below 384MB (256) still wins.
-            let deviceRAMGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0 * 1024.0)
-            let isDesktopSession = getenv("MADEIRA_DESKTOP").map { $0.pointee == 49 } ?? false
-            if deviceRAMGB >= 6.0 && poolSizeMB < 1024 {
-                logStore.log("Device RAM ≈ \(Int(deviceRAMGB.rounded()))GB: JIT pool \(poolSizeMB)MB → 1024MB maximum", level: .info)
-                poolSizeMB = 1024
-            }
-            if deviceRAMGB < 4.6 && poolSizeMB > 384 {
-                logStore.log("Device RAM ≈ \(Int(deviceRAMGB.rounded()))GB: JIT pool \(poolSizeMB)MB → 384MB (jetsam safety on 4GB devices)", level: .info)
-                poolSizeMB = 384
-            }
-            // Publish to env so FEXBridge.mm::jit_pool_size_mb() uses the same value.
-            setenv("MADEIRA_JIT_POOL_MB", "\(poolSizeMB)", 1)
-            logStore.log("Using JIT pool size: \(poolSizeMB)MB (Phone Optimization: \(phoneOptimization ? "ON" : "OFF"))", level: .info)
-
-            // Phone Hardware Optimization: Clamp extra buffers on phones to keep total footprint low
-            if phoneOptimization {
-                setenv("MADEIRA_PHONE_OPT", "1", 1)
-                // Limit surface queue bursts to prevent spikes in physical memory
-                setenv("MADEIRA_SURF_SEQ", "4", 1)
+                logStore.log("JIT pool overridden to \(mb)MB via madeira-pool.txt")
             }
             // ml694: W^X A/B switch. Documents/madeira-wx.txt containing "0"
             // disables page demotion for the SAME binary, so the on/off
@@ -2314,13 +2096,17 @@ struct ContentView: View {
                 setenv("WINE_IOS_JIT_RW", String(format: "%lx", Int(bitPattern: pool.rw)), 1)
                 setenv("WINE_IOS_JIT_SIZE", String(format: "%lx", pool.size), 1)
             } else {
+                // ml596: ABORT. "Continuing without it" produced ml595 — a run that
+                // looked like an ARM64EC/optimizer regression but was only Wine
+                // executing with no JIT pool, and it cost a diagnostic cycle plus a
+                // wrong conclusion I wrote into the source. A run without the pool can
+                // only manufacture misleading secondary crashes, so refuse to start one.
                 logStore.log("JIT pool allocation FAILED — not starting Wine.", level: .error)
-                logStore.log("  Try adjusting JIT Pool Size in Settings (e.g. 256MB or 384MB).", level: .info)
-                DispatchQueue.main.async {
-                    self.logStore.uiPaused = false
-                    self.wineLaunchInProgress = false
-                    NotificationCenter.default.post(name: NSNotification.Name("MadeiraBadPoolNotification"), object: nil)
-                }
+                logStore.log("  All placements landed in the forbidden guest 64G window.", level: .info)
+                logStore.log("  Force-quit and relaunch: placement is chosen by the kernel", level: .info)
+                logStore.log("  and depends on current memory layout, so a fresh process", level: .info)
+                logStore.log("  usually lands somewhere valid.", level: .info)
+                logStore.uiPaused = false
                 return
             }
 
@@ -2351,7 +2137,7 @@ struct ContentView: View {
             // ORDERING MATTERS: our task-port claim installs at wine's first thread
             // setup, which is AFTER this point, so this BRK still reaches StikDebug.
             // Flip to false to A/B against the old attached-for-the-whole-run behaviour.
-            let earlyDetach = false
+            let earlyDetach = true
             if earlyDetach, pool != nil {
                 let dt0 = CFAbsoluteTimeGetCurrent()
                 StikJITHelper.detachDebugger()
@@ -2365,26 +2151,13 @@ struct ContentView: View {
             winios_phase("detach-done")
 
             // Step 2: Start wineserver
-            guard self.startWineserver() else {
-                DispatchQueue.main.async {
-                    self.logStore.uiPaused = false
-                    self.wineLaunchInProgress = false
-                }
-                return
-            }
+            self.startWineserver()
             winios_phase("wineserver-up")
 
             // Step 3: Start Wine (debugger still attached for PE loading BRK calls)
             Thread.sleep(forTimeInterval: 2.0)
             winios_phase("wine-start")
-            guard self.startWineProcess() else {
-                DispatchQueue.main.async {
-                    ws_log_quiet = 0
-                    self.logStore.uiPaused = false
-                    self.wineLaunchInProgress = false
-                }
-                return
-            }
+            self.startWineProcess()
 
             // Step 4: Wait for Wine to finish instead of fixed timer
             // Poll wine_process_is_running() — it clears when __wine_main returns
@@ -2435,6 +2208,7 @@ struct ContentView: View {
                 // mid-session, and later program launches still need the
                 // attached-debugger facilities. Desktop sessions stay
                 // attached until the desktop exits (or the safety cap).
+                let isDesktopSession = getenv("MADEIRA_DESKTOP").map { $0.pointee == 49 } ?? false
                 if !isDesktopSession {
                     if presentingSince == nil && madeira_get_present_count() >= 1 {
                         presentingSince = now
@@ -2464,10 +2238,7 @@ struct ContentView: View {
             logStore.log("Detaching debugger...")
             StikJITHelper.detachDebugger()
 
-            DispatchQueue.main.async {
-                heartbeat.invalidate()
-                self.wineLaunchInProgress = false
-            }
+            DispatchQueue.main.async { heartbeat.invalidate() }
         }
     }
 
@@ -2496,89 +2267,22 @@ struct ContentView: View {
             ("C:\\Program Files\\Steam",       "\(prefix)/drive_c/Program Files/Steam"),
         ]
 
-        var winDirFound: String? = candidates.first(where: {
+        guard let (winDir, _) = candidates.first(where: {
             fm.fileExists(atPath: "\($0.1)/steam.exe")
-        })?.0
-
-        // If steam is not found in prefix, check if a preinstalled steam archive was bundled in the App
-        if winDirFound == nil {
-            if let bundledSteamTgz = Bundle.main.path(forResource: "steam", ofType: "tar.gz") {
-                logStore.log("Found preinstalled Steam bundle in app resources. Extracting...", level: .info)
-                let targetSteamDir = "\(prefix)/drive_c/Program Files (x86)/Steam"
-                try? fm.createDirectory(atPath: targetSteamDir, withIntermediateDirectories: true)
-                let result = bundledSteamTgz.withCString { archivePath in
-                    targetSteamDir.withCString { destinationPath in
-                        madeira_extract_prefix_tgz(archivePath, destinationPath)
-                    }
-                }
-                if result == 0 {
-                    logStore.log("Preinstalled Steam extracted successfully.", level: .success)
-                    if fm.fileExists(atPath: "\(targetSteamDir)/steam.exe") {
-                        winDirFound = "C:\\Program Files (x86)\\Steam"
-                    }
-                }
-            }
-        }
-
-        guard let winDir = winDirFound else {
+        }) else {
             logStore.log("Steam is not installed in this prefix.", level: .error)
             logStore.log("  Searched: Program Files (x86)\\Steam and Program Files\\Steam", level: .info)
-            logStore.log("  You can install it via 'Install / Run EXE' with SteamSetup.exe — 32-bit", level: .info)
-            logStore.log("  steam.exe is supported when the build includes 32-bit (WoW64) support", level: .info)
-            logStore.log("  (i386-windows PE set; see BUILDING.md), or use a 64-bit Steam archive.", level: .info)
-            return false
-        }
-
-        // ml777: read the PE machine type of the steam.exe we're about to run.
-        // Real Steam is 32-bit x86 (no "x64" in the name — the old heuristic
-        // could never see it); 64-bit archives carry an x86-64 steam.exe.
-        let steamWinExe = "\(winDir)\\steam.exe"
-        var peMachine: UInt32 = 0
-        let peRC = steamWinExe.withCString { cWin in
-            prefix.withCString { cPrefix in
-                madeira_pe_machine_from_win_path(cPrefix, cWin, &peMachine)
-            }
-        }
-        var steamIs32Bit = false
-        if peRC == 0 {
-            steamIs32Bit = (peMachine == 0x014c) /* IMAGE_FILE_MACHINE_I386 */
-            logStore.log("steam.exe PE machine: 0x\(String(peMachine, radix: 16)) (\(steamIs32Bit ? "32-bit x86" : "64-bit/ARM64"))", level: .info)
-        } else {
-            logStore.log("steam.exe PE header unreadable — launching with session defaults.", level: .info)
-        }
-
-        if steamIs32Bit && wow64Support {
-            // 32-bit Steam needs the optional i386 (WoW64) PE set in the bundle.
-            if !fm.fileExists(atPath: "\(Bundle.main.bundlePath)/i386-windows") {
-                logStore.log("This steam.exe is 32-bit x86, but this build has no 32-bit (WoW64) support installed.", level: .error)
-                logStore.log("  The i386-windows PE set is missing from the bundle. Rebuild the IPA with", level: .info)
-                logStore.log("  MADEIRA_BUILD_I386=1 (see BUILDING.md → '32-bit (WoW64) support').", level: .info)
-                logStore.log("  Tip: a 64-bit Steam archive (x86-64 steam.exe) runs without it.", level: .info)
-                return false
-            }
-            logStore.log("32-bit Steam detected: WoW64 session will be used (MADEIRA_WOW64=1).", level: .success)
-            // XS-class devices: Steam+CEF runs near the jetsam ceiling there.
-            // Say so before the app is killed instead of the user guessing.
-            let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0 * 1024.0)
-            if ramGB < 4.6 {
-                logStore.log("Device has ~\(Int(ramGB.rounded()))GB RAM: Steam runs near the jetsam ceiling on this device.", level: .info)
-                logStore.log("  If the app closes to the home screen mid-run: set JIT Pool Size to 256MB in", level: .info)
-                logStore.log("  Phone & Display Settings and keep Phone Optimization ON.", level: .info)
-            }
-        } else if steamIs32Bit {
-            logStore.log("This steam.exe is 32-bit x86 but 32-bit (WoW64) support is disabled in Phone & Display Settings.", level: .error)
-            logStore.log("  Enable '32-bit Games & Apps (WoW64)' or use a 64-bit Steam archive.", level: .info)
+            logStore.log("  Valve's SteamSetup.exe cannot be used to install it here: the", level: .info)
+            logStore.log("  installer AND the Steam.exe it lays down are 32-bit x86, and this", level: .info)
+            logStore.log("  build runs x86-64 only (ARM64EC + FEX, no 32-bit emulator).", level: .info)
+            logStore.log("  Copy an existing 64-bit Steam folder into the prefix instead.", level: .info)
             return false
         }
 
         let bat = """
         @echo off\r
         rem Generated by Madeira (ml589) — do not hand-edit; rewritten every launch.\r
-        rem NOTE: do NOT start services.exe here — Wine's wineserver bootstrap\r
-        rem already initialises services (rpcss, etc.) before the first Wine process\r
-        rem runs. Explicitly starting services.exe in an ARM64EC session causes\r
-        rem rpcss (ARM64-native) to fail under the x64 session process model,\r
-        rem which then breaks all COM/RPC calls for the remainder of the session.\r
+        start "" "C:\\windows\\system32\\services.exe"\r
         cd /d "\(winDir)"\r
         "\(winDir)\\steam.exe" -no-cef-sandbox -cef-disable-gpu -console -nocrashmonitor -cef-disable-features=SegmentationPlatform,OptimizationTargetPrediction,OptimizationHints\r
         """
@@ -2594,97 +2298,7 @@ struct ContentView: View {
         return true
     }
 
-    /// Import an installer (.exe) or archive (.zip, .tar.gz) from iOS Files into Wine
-    private func handleImportedFile(_ result: Result<[URL], Error>) {
-        switch result {
-        case .failure(let error):
-            logStore.log("Failed to select file: \(error.localizedDescription)", level: .error)
-        case .success(let urls):
-            guard let selectedURL = urls.first else { return }
-
-            guard selectedURL.startAccessingSecurityScopedResource() else {
-                logStore.log("Unable to access selected file permission", level: .error)
-                return
-            }
-            defer { selectedURL.stopAccessingSecurityScopedResource() }
-
-            let fm = FileManager.default
-            guard let docDir = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
-            let prefix = docDir.appendingPathComponent("wine").path
-            let driveCDir = "\(prefix)/drive_c"
-            let installersDir = "\(driveCDir)/Installers"
-            let filename = selectedURL.lastPathComponent
-            let lowerFilename = filename.lowercased()
-
-            // Robust feature: If user imports a Steam archive (zip / tgz / tar.gz) or game archive,
-            // extract it into drive_c automatically!
-            if lowerFilename.hasSuffix(".tar.gz") || lowerFilename.hasSuffix(".tgz") {
-                logStore.log("Detected tar.gz archive: \(filename). Extracting to drive_c...", level: .info)
-                let targetDir: String
-                if lowerFilename.contains("steam") {
-                    targetDir = "\(driveCDir)/Program Files (x86)/Steam"
-                } else {
-                    targetDir = driveCDir
-                }
-                do {
-                    try fm.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
-                    let tempArchive = "\(targetDir)/\(filename)"
-                    if fm.fileExists(atPath: tempArchive) { try fm.removeItem(atPath: tempArchive) }
-                    try fm.copyItem(at: selectedURL, to: URL(fileURLWithPath: tempArchive))
-                    
-                    let extractResult = tempArchive.withCString { archivePath in
-                        targetDir.withCString { destinationPath in
-                            madeira_extract_prefix_tgz(archivePath, destinationPath)
-                        }
-                    }
-                    try? fm.removeItem(atPath: tempArchive)
-                    
-                    if extractResult == 0 {
-                        logStore.log("Successfully extracted \(filename) to \(targetDir)", level: .success)
-                    } else {
-                        logStore.log("Failed to extract \(filename)", level: .error)
-                    }
-                } catch {
-                    logStore.log("Error extracting archive: \(error.localizedDescription)", level: .error)
-                }
-                return
-            }
-
-            do {
-                if !fm.fileExists(atPath: installersDir) {
-                    try fm.createDirectory(atPath: installersDir, withIntermediateDirectories: true, attributes: nil)
-                }
-
-                // Sanitize filename: replace spaces with underscores so the Wine
-                // MADEIRA_ARGS space-tokenizer never splits the path mid-filename.
-                let safeFilename = filename.replacingOccurrences(of: " ", with: "_")
-                let destPath = "\(installersDir)/\(safeFilename)"
-                if fm.fileExists(atPath: destPath) {
-                    try fm.removeItem(atPath: destPath)
-                }
-                try fm.copyItem(at: selectedURL, to: URL(fileURLWithPath: destPath))
-
-                logStore.log("Imported: \(filename) → drive_c\\Installers\\\(safeFilename)", level: .success)
-
-                // Configure Wine to launch the installer/executable inside a virtual desktop window.
-                // MADEIRA_EXE = explorer.exe, MADEIRA_ARGS = /desktop=shell,WxH <exe-path>
-                // The exe path is space-free thanks to safeFilename above.
-                let deskW = 1024, deskH = 768
-                setenv("MADEIRA_EXE", "explorer.exe", 1)
-                setenv("MADEIRA_ARGS", "/desktop=shell,\(deskW)x\(deskH) C:\\Installers\\\(safeFilename)", 1)
-                setenv("MADEIRA_DESKTOP", "1", 1)
-                setenv("MADEIRA_SCREEN_W", String(deskW), 1)
-                setenv("MADEIRA_SCREEN_H", String(deskH), 1)
-
-                logStore.log("Launching: C:\\Installers\\\(safeFilename) ...", level: .info)
-                runWineFullSequence()
-            } catch {
-                logStore.log("Failed to process imported file: \(error.localizedDescription)", level: .error)
-            }
-        }
-    }
-
-    private func startWineserver() -> Bool {
+    private func startWineserver() {
         logStore.log("Starting wineserver...")
 
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -2698,15 +2312,14 @@ struct ContentView: View {
         } else {
             logStore.log("Failed to start wineserver (error: \(result))", level: .error)
         }
-        return result == 0
     }
 
-    private func startWineProcess() -> Bool {
+    private func startWineProcess() {
         logStore.log("Starting Wine process...")
 
         if wineserver_is_running() == 0 {
             logStore.log("Wineserver not running! Start it first.", level: .error)
-            return false
+            return
         }
 
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -2719,7 +2332,6 @@ struct ContentView: View {
         } else {
             logStore.log("Failed to start Wine process (error: \(result))", level: .error)
         }
-        return result == 0
     }
 
     private func testDualMapping() {
@@ -2935,7 +2547,6 @@ final class TouchControlsModel: ObservableObject {
 
     @Published var controls: [TouchControl] = [] { didSet { save() } }
     @Published var visible = true               { didSet { save() } }
-    @Published var glassStyling = true          { didSet { save() } }
     @Published var editing = false              // transient, never persisted
     @Published var selected: UUID?              // transient
 
@@ -2945,7 +2556,7 @@ final class TouchControlsModel: ObservableObject {
             .appendingPathComponent("madeira-controls.json")
     }
 
-    private struct Saved: Codable { var controls: [TouchControl]; var visible: Bool; var glassStyling: Bool? }
+    private struct Saved: Codable { var controls: [TouchControl]; var visible: Bool }
 
     private init() {
         loading = true
@@ -2953,14 +2564,13 @@ final class TouchControlsModel: ObservableObject {
            let s = try? JSONDecoder().decode(Saved.self, from: d) {
             controls = s.controls
             visible  = s.visible
-            glassStyling = s.glassStyling ?? true
         }
         loading = false
     }
 
     private func save() {
         guard !loading else { return }
-        guard let d = try? JSONEncoder().encode(Saved(controls: controls, visible: visible, glassStyling: glassStyling))
+        guard let d = try? JSONEncoder().encode(Saved(controls: controls, visible: visible))
         else { return }
         try? d.write(to: Self.url, options: .atomic)
     }
@@ -2980,11 +2590,12 @@ final class TouchControlsModel: ObservableObject {
     /// touch in the window. Nothing responded, and edit mode — whose branch
     /// captured everything — could never be entered to mask it.
     func hitsInteractive(_ p: CGPoint, in bounds: CGRect) -> Bool {
-        // Adjusted fullscreen / menu button positions: Top bar buttons (gamecontroller, pencil/checkmark, etc.)
-        // Padded generously; buttons auto-hide after 6s but remain tappable while invisible.
-        let barW: CGFloat = 3 * 48 + 30
-        if CGRect(x: bounds.midX - barW / 2 - 15, y: 0,
-                  width: barW + 30, height: 74).contains(p) { return true }
+        // Top bar: two 44pt buttons 10pt apart in play mode, centred, 10pt down.
+        // Padded generously; a few points of slop costs nothing and a missed tap
+        // costs a build.
+        let barW: CGFloat = 2 * 44 + 10
+        if CGRect(x: bounds.midX - barW / 2 - 10, y: 0,
+                  width: barW + 20, height: 68).contains(p) { return true }
         guard visible else { return false }
         for c in controls {
             let r = Self.baseDiameter * CGFloat(c.scale) / 2
@@ -3047,21 +2658,6 @@ enum TouchControlsHost {
 struct TouchControlsOverlay: View {
     @ObservedObject private var m = TouchControlsModel.shared
     @State private var pinchBase: Double?
-    @State private var controlsVisible = true
-    @State private var hideTimer: Timer?
-
-    private func resetAutoHideTimer() {
-        hideTimer?.invalidate()
-        controlsVisible = true
-        // Auto-hide fullscreen buttons after 6 seconds while keeping them tappable
-        hideTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { _ in
-            withAnimation(.easeInOut(duration: 0.35)) {
-                if !m.editing {
-                    controlsVisible = false
-                }
-            }
-        }
-    }
 
     var body: some View {
         GeometryReader { geo in
@@ -3075,7 +2671,6 @@ struct TouchControlsOverlay: View {
                         }
                     }
                     topBar
-                        .onAppear { resetAutoHideTimer() }
                     if m.editing, let i = m.index(of: m.selected) {
                         MappingPanel(control: m.controls[i], screen: geo.size)
                     }
@@ -3089,20 +2684,11 @@ struct TouchControlsOverlay: View {
     }
 
     private var topBar: some View {
-        HStack(spacing: 12) {
-            glassButton("gamecontroller", dim: !m.visible) {
-                m.visible.toggle()
-                resetAutoHideTimer()
-            }
+        HStack(spacing: 10) {
+            glassButton("gamecontroller", dim: !m.visible) { m.visible.toggle() }
             glassButton(m.editing ? "checkmark" : "pencil") {
                 m.editing.toggle()
-                if !m.editing {
-                    m.selected = nil
-                    resetAutoHideTimer()
-                } else {
-                    controlsVisible = true
-                    hideTimer?.invalidate()
-                }
+                if !m.editing { m.selected = nil }
             }
             if m.editing {
                 glassButton("plus") {
@@ -3116,9 +2702,7 @@ struct TouchControlsOverlay: View {
                 .transition(.opacity.combined(with: .scale))
             }
         }
-        .padding(.top, 12)
-        .opacity(controlsVisible || m.editing ? 1.0 : 0.02) // Auto-hide after 6s but remains tappable while invisible
-        .animation(.easeInOut(duration: 0.28), value: controlsVisible)
+        .padding(.top, 10)
         .animation(.easeInOut(duration: 0.22), value: m.editing)
     }
 
@@ -3137,36 +2721,31 @@ struct TouchControlsOverlay: View {
     private func glassButton(_ system: String, dim: Bool = false,
                              _ action: @escaping () -> Void) -> some View {
         Button {
-            resetAutoHideTimer()
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             withAnimation(.easeInOut(duration: 0.22)) { action() }
         } label: {
+            // Stroke only — never a .fill variant.
             Image(systemName: system)
                 .font(.system(size: 18, weight: .regular))
                 .foregroundStyle(.white.opacity(dim ? 0.35 : 1.0))
                 .frame(width: 44, height: 44)
-                .background(
-                    Group {
-                        if m.glassStyling {
-                            GlassShape(circle: true)
-                        } else {
-                            Circle().fill(Color.black.opacity(0.4))
-                        }
-                    }
-                )
+                .background(GlassShape(circle: true))
         }
         .buttonStyle(.plain)
     }
 }
 
-/// Shared glass backing using system ultraThinMaterial.
+/// Shared glass backing, with the pre-26 fallback the codebase already uses.
 struct GlassShape: View {
     var circle = false
-    @ViewBuilder var body: some View {
-        if circle {
-            Circle().fill(.ultraThinMaterial)
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            if circle { Circle().fill(.clear).glassEffect(.regular, in: Circle()) }
+            else { RoundedRectangle(cornerRadius: 18).fill(.clear)
+                     .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18)) }
         } else {
-            RoundedRectangle(cornerRadius: 18).fill(.ultraThinMaterial)
+            if circle { Circle().fill(.ultraThinMaterial) }
+            else { RoundedRectangle(cornerRadius: 18).fill(.ultraThinMaterial) }
         }
     }
 }
@@ -3310,28 +2889,8 @@ struct TouchControlButton: View {
             if down { MetalBackedView.toggleKeyboard() }
         case .none, .joystickWASD, .joystickArrows:
             break                                              // sticks drive themselves
-        case .pad(let name):
-            // Wire on-screen gamepad touch buttons to standard Windows bindings
-            switch name {
-            case "A": winios_post_key(0x20, down ? 1 : 0) // Space (Jump)
-            case "B": winios_post_key(0x1B, down ? 1 : 0) // Esc (Back/Cancel)
-            case "X": winios_post_key(0x45, down ? 1 : 0) // E (Interact/Action)
-            case "Y": winios_post_key(0x52, down ? 1 : 0) // R (Reload)
-            case "D↑": winios_post_key(0x26, down ? 1 : 0) // Up
-            case "D↓": winios_post_key(0x28, down ? 1 : 0) // Down
-            case "D←": winios_post_key(0x25, down ? 1 : 0) // Left
-            case "D→": winios_post_key(0x27, down ? 1 : 0) // Right
-            case "LB": winios_post_key(0x10, down ? 1 : 0) // Shift (Sprint)
-            case "RB": winios_post_key(0x09, down ? 1 : 0) // Tab (Scoreboard/Inventory)
-            case "LT": winios_pointer(0, 0, down ? 0x0008 : 0x0010, 0) // Right Click
-            case "RT": winios_pointer(0, 0, down ? 0x0002 : 0x0004, 0) // Left Click
-            case "L3": winios_post_key(0x11, down ? 1 : 0) // Ctrl (Crouch)
-            case "R3": winios_post_key(0x46, down ? 1 : 0) // F (Melee/Flashlight)
-            case "Menu": winios_post_key(0x1B, down ? 1 : 0) // Esc
-            case "View": winios_post_key(0x09, down ? 1 : 0) // Tab
-            case "Guide": if down { MetalBackedView.toggleKeyboard() }
-            default: break
-            }
+        case .pad:
+            break     // ml645: no XInput yet — deliberately inert, and labelled so
         }
     }
 }
@@ -3469,9 +3028,10 @@ struct MappingPanel: View {
 
     private var controllerTab: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Gamepad layout: controls map to standard game keys (A=Space, B=Esc, X=E, Y=R, RT=Fire/Left Click, LT=Aim/Right Click, Sticks=WASD/Arrows).")
+            Text("XInput isn't wired up yet. These save with your layout but do "
+                 + "nothing when pressed — controller support lands with the Wine HID stack.")
                 .font(.system(size: 11))
-                .foregroundStyle(.green.opacity(0.95))
+                .foregroundStyle(.orange.opacity(0.95))
                 .fixedSize(horizontal: false, vertical: true)
             section("Face", [("A", .pad("A")), ("B", .pad("B")), ("X", .pad("X")), ("Y", .pad("Y"))])
             section("D-pad", [("D↑", .pad("D↑")), ("D↓", .pad("D↓")),

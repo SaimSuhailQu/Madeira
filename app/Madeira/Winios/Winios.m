@@ -676,7 +676,6 @@ static void winios_ensure_compositor(void) {
      * explorer's own background paint works) */
     g_compositor_view.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1.0];
     g_desk_bg = [CALayer layer];
-    g_desk_bg.zPosition = -1000.0;
     g_desk_bg.backgroundColor = [UIColor colorWithRed:0.0 green:0.502 blue:0.502 alpha:1.0].CGColor;
     [g_compositor_view.layer addSublayer:g_desk_bg];
     [win addSubview:g_compositor_view];

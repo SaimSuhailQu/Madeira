@@ -49,13 +49,6 @@ void jit_region_invalidate(JITRegion *region, size_t offset, size_t size);
 // Returns true if the debugger has attached and set the flag.
 bool jit_check_debugged(void);
 
-// Create a dual-mapped JIT memory pool directly (for LiveContainer, SideStore, TrollStore, AltStore).
-// Returns true on success and populates out_rx and out_rw. Returns false on failure.
-bool jit_create_pool_dual_map(size_t size, void **out_rx, void **out_rw);
-
-// Destroy a JIT region created with jit_create_pool_dual_map.
-void jit_destroy_pool_dual_map(void *rx_addr, void *rw_addr, size_t size);
-
 // Install SIGTRAP handler so BRK instructions don't crash the app
 // when no debugger is attached. Must be called before any jit26_* functions.
 void jit_install_trap_handler(void);
