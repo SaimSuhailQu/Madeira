@@ -568,11 +568,7 @@ struct JoystickFace: View {
     private let knobTravelRatio: CGFloat = 0.30
 
     @ViewBuilder private var interior: some View {
-        if #available(iOS 26.0, *) {
-            Circle().fill(.clear).glassEffect(.regular, in: Circle())
-        } else {
-            Circle().fill(.ultraThinMaterial)
-        }
+        Circle().fill(.ultraThinMaterial)
     }
 
     private func knobOffset(_ d: CGFloat) -> CGSize {
@@ -2738,14 +2734,11 @@ struct TouchControlsOverlay: View {
 /// Shared glass backing, with the pre-26 fallback the codebase already uses.
 struct GlassShape: View {
     var circle = false
-    var body: some View {
-        if #available(iOS 26.0, *) {
-            if circle { Circle().fill(.clear).glassEffect(.regular, in: Circle()) }
-            else { RoundedRectangle(cornerRadius: 18).fill(.clear)
-                     .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18)) }
+    @ViewBuilder var body: some View {
+        if circle {
+            Circle().fill(.ultraThinMaterial)
         } else {
-            if circle { Circle().fill(.ultraThinMaterial) }
-            else { RoundedRectangle(cornerRadius: 18).fill(.ultraThinMaterial) }
+            RoundedRectangle(cornerRadius: 18).fill(.ultraThinMaterial)
         }
     }
 }

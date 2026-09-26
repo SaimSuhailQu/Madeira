@@ -207,7 +207,7 @@ final class LogStore: ObservableObject {
         // arrived in one batch, we get one entry with count=5)
         var batchSigToBatchIdx: [String: Int] = [:]
         var collapsedNew: [LogEntry] = []
-        for var entry in newBatch {
+        for entry in newBatch {
             if let i = batchSigToBatchIdx[entry.signature] {
                 collapsedNew[i].count += 1
                 collapsedNew[i].lastTimestamp = entry.lastTimestamp

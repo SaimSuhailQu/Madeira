@@ -20,7 +20,7 @@ struct LogPattern {
         }
 
         // Detect level marker right after timestamp, like `[INFO]` `[ERR]` etc.
-        var level = inferLevel(from: s)
+        let level = inferLevel(from: s)
 
         // Strip top-level `[LEVEL]` if present
         if let r = s.range(of: #"^\[(INFO|OK|ERR|DBG|WARN|FATAL)\]\s*"#, options: .regularExpression) {
