@@ -305,4 +305,162 @@ public final class GameLibraryManager: ObservableObject {
         }
         return items
     }
+
+    /// Add a game directly by writing a .lua descriptor
+    public func addLuaGame(id: String, name: String, exePath: String, args: String, appId: String?, is64Bit: Bool) {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let launchersDir = docs.appendingPathComponent("Launchers")
+        try? FileManager.default.createDirectory(at: launchersDir, withIntermediateDirectories: true)
+
+        let safeId = id.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: " ", with: "_")
+        let fileURL = launchersDir.appendingPathComponent("\(safeId).lua")
+
+        let escapedExe = exePath.replacingOccurrences(of: "\\", with: "\\\\")
+        let escapedArgs = args.replacingOccurrences(of: "\\", with: "\\\\")
+
+        let luaContent = """
+        -- Madeira Auto-Generated Launcher
+        name = "\(name)"
+        exe = "\(escapedExe)"
+        args = "\(escapedArgs)"
+        appid = "\(appId ?? "")"
+        is_64bit = \(is64Bit ? "true" : "false")
+        icon = "gamecontroller.fill"
+        """
+
+        try? luaContent.write(to: fileURL, atomically: true, encoding: .utf8)
+        reloadLibrary()
+    }
+
+    /// Add a game directly from an appmanifest (.acf) file content
+    public func importManifestContent(_ content: String) {
+        guard let prefix = winePrefixURL() else { return }
+        let appId = extractKey(content, key: "appid") ?? extractKey(content, key: "AppId") ?? "\(Int(Date().timeIntervalSince1970))"
+        let name = extractKey(content, key: "name") ?? "Steam Game \(appId)"
+        let installDir = extractKey(content, key: "installdir") ?? name
+
+        // Write to steamapps
+        let steamAppsDir = prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam/steamapps")
+        try? FileManager.default.createDirectory(at: steamAppsDir, withIntermediateDirectories: true)
+        let manifestFile = steamAppsDir.appendingPathComponent("appmanifest_\(appId).acf")
+        try? content.write(to: manifestFile, atomically: true, encoding: .utf8)
+
+        // Also create a quick .lua launcher fallback in Launchers/
+        let exeGuess = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\\(installDir)\\\(installDir).exe"
+        addLuaGame(id: "steam_\(appId)", name: name, exePath: exeGuess, args: "", appId: appId, is64Bit: true)
+        reloadLibrary()
+    }
 }
+
+// =============================================================================
+// Background Steam Game Download Manager
+// =============================================================================
+
+public struct DownloadProgress: Identifiable {
+    public let id: String
+    public var title: String
+    public var progress: Double // 0.0 ... 1.0
+    public var downloadedBytes: Int64
+    public var totalBytes: Int64
+    public var status: String
+    public var isComplete: Bool
+}
+
+public final class GameDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
+    public static let shared = GameDownloadManager()
+
+    @Published public var activeDownloads: [String: DownloadProgress] = [:]
+    private var session: URLSession!
+    private var taskMap: [URLSessionDownloadTask: (id: String, destination: URL)] = [:]
+
+    private override init() {
+        super.init()
+        let config = URLSessionConfiguration.background(withIdentifier: "com.madeira.background-downloader")
+        config.isDiscretionary = false
+        config.sessionSendsLaunchEvents = true
+        config.shouldUseExtendedBackgroundIdleMode = true
+        session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }
+
+    /// Download game assets or zip packages directly to Wine prefix in background
+    public func startDownload(
+        id: String,
+        title: String,
+        from url: URL,
+        destinationFolder: String = "Games"
+    ) {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let destDir = docs.appendingPathComponent("wine/drive_c").appendingPathComponent(destinationFolder)
+        try? FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
+        let finalDestination = destDir.appendingPathComponent(url.lastPathComponent)
+
+        let task = session.downloadTask(with: url)
+        taskMap[task] = (id, finalDestination)
+
+        DispatchQueue.main.async {
+            self.activeDownloads[id] = DownloadProgress(
+                id: id,
+                title: title,
+                progress: 0.0,
+                downloadedBytes: 0,
+                totalBytes: 0,
+                status: "Starting background download...",
+                isComplete: false
+            )
+        }
+        task.resume()
+    }
+
+    public func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard let (id, _) = taskMap[downloadTask] else { return }
+        let progress = totalBytesExpectedToWrite > 0 ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) : 0.0
+
+        DispatchQueue.main.async {
+            if var item = self.activeDownloads[id] {
+                item.progress = progress
+                item.downloadedBytes = totalBytesWritten
+                item.totalBytes = totalBytesExpectedToWrite
+                let mbDownloaded = Double(totalBytesWritten) / 1024.0 / 1024.0
+                let mbTotal = Double(totalBytesExpectedToWrite) / 1024.0 / 1024.0
+                item.status = String(format: "%.1f MB / %.1f MB (%.0f%%)", mbDownloaded, mbTotal, progress * 100)
+                self.activeDownloads[id] = item
+            }
+        }
+    }
+
+    public func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        guard let (id, destination) = taskMap[downloadTask] else { return }
+        try? FileManager.default.removeItem(at: destination)
+        do {
+            try FileManager.default.moveItem(at: location, to: destination)
+            DispatchQueue.main.async {
+                if var item = self.activeDownloads[id] {
+                    item.progress = 1.0
+                    item.status = "Complete: saved to \(destination.lastPathComponent)"
+                    item.isComplete = true
+                    self.activeDownloads[id] = item
+                }
+                GameLibraryManager.shared.reloadLibrary()
+            }
+        } catch {
+            DispatchQueue.main.async {
+                if var item = self.activeDownloads[id] {
+                    item.status = "Failed: \(error.localizedDescription)"
+                    self.activeDownloads[id] = item
+                }
+            }
+        }
+        taskMap.removeValue(forKey: downloadTask)
+    }
+}
+

@@ -849,6 +849,7 @@ struct ContentView: View {
     @StateObject private var gameLibrary = GameLibraryManager.shared
     @State private var selectedLibraryItem: LibraryItem?
     @State private var showLibrarySheet = false
+    @State private var showSettingsSheet = false
     @State private var pointerPanel = false
     @Namespace private var pointerNS
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
@@ -885,6 +886,28 @@ struct ContentView: View {
             .navigationTitle("Madeira")
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(vSizeClass == .compact)
+            .toolbar {
+                if vSizeClass != .compact {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        HStack(spacing: 12) {
+                            Button(action: { showLibrarySheet = true }) {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 17))
+                            }
+                            Button(action: { showSettingsSheet = true }) {
+                                Image(systemName: "gearshape.fill")
+                                    .font(.system(size: 17))
+                            }
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: $showSettingsSheet) {
+                MadeiraSettingsSheet(isPresented: $showSettingsSheet)
+            }
+            .sheet(isPresented: $showLibrarySheet) {
+                AddGameSheet(isPresented: $showLibrarySheet)
+            }
             .onAppear {
                 jit_install_trap_handler()
                 entitlements = EntitlementStatus.check()
@@ -2459,6 +2482,232 @@ struct ContentView: View {
 
         jit_region_destroy(region)
         logStore.log("Region destroyed. Dual mapping test complete.")
+    }
+}
+
+// =============================================================================
+// Settings Sheet View
+// =============================================================================
+
+struct MadeiraSettingsSheet: View {
+    @Binding var isPresented: Bool
+    @ObservedObject private var input = InputSettings.shared
+    @State private var poolSizeMB: String = "896"
+    @State private var enableQuietMode: Bool = true
+    @State private var enableDesktopMode: Bool = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Memory & JIT Configuration") {
+                    HStack {
+                        Text("JIT Pool Size (MB)")
+                        Spacer()
+                        TextField("896", text: $poolSizeMB)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 80)
+                    }
+                    Text("Controls Documents/madeira-pool.txt. Lowering to 512MB helps avoid Jetsam memory limit issues on non-jailbroken devices.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Section("Controls & Pointer") {
+                    Toggle("Relative Pointer (Trackpad)", isOn: $input.relative)
+                    HStack {
+                        Text("Sensitivity")
+                        Spacer()
+                        Slider(value: input.relative ? $input.sensRel : $input.sensAbs, in: 0.1...8.0)
+                            .frame(width: 140)
+                        Text(String(format: "%.1f", input.relative ? input.sensRel : input.sensAbs))
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    Toggle("Performance Diagnostics", isOn: $input.diagnostics)
+                }
+
+                Section("Wine Environment") {
+                    Toggle("Default to Wine Desktop", isOn: $enableDesktopMode)
+                    Toggle("Quiet Mode (MADEIRA_QUIET=1)", isOn: $enableQuietMode)
+                }
+
+                Section("Active Background Downloads") {
+                    ActiveDownloadsListView()
+                }
+
+                Section("Storage & Prefix") {
+                    Button("Clean Stale Shader & DXMT Caches", role: .destructive) {
+                        let fm = FileManager.default
+                        if let d = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+                            try? fm.removeItem(at: d.appendingPathComponent("wine/drive_c/windows/temp"))
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Madeira Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        saveSettings()
+                        isPresented = false
+                    }
+                }
+            }
+            .onAppear {
+                loadSettings()
+            }
+        }
+    }
+
+    private func loadSettings() {
+        if let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+           let txt = try? String(contentsOf: d.appendingPathComponent("madeira-pool.txt"), encoding: .utf8) {
+            poolSizeMB = txt.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private func saveSettings() {
+        if let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let poolFile = d.appendingPathComponent("madeira-pool.txt")
+            let trimmed = poolSizeMB.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                try? trimmed.write(to: poolFile, atomically: true, encoding: .utf8)
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Add Game & Steam Downloader Sheet View
+// =============================================================================
+
+struct AddGameSheet: View {
+    @Binding var isPresented: Bool
+    @State private var mode = 0 // 0: Custom .lua, 1: Import .acf, 2: Steam Downloader
+
+    // Custom Lua
+    @State private var gameTitle = ""
+    @State private var exePath = "C:\\Games\\"
+    @State private var launchArgs = ""
+    @State private var steamAppId = ""
+    @State private var is64Bit = true
+
+    // Manifest ACF
+    @State private var manifestContent = ""
+
+    // Downloader
+    @State private var downloadUrl = ""
+    @State private var downloadGameName = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Picker("Method", selection: $mode) {
+                    Text("Lua Launcher").tag(0)
+                    Text("Steam .acf").tag(1)
+                    Text("Downloader").tag(2)
+                }
+                .pickerStyle(.segmented)
+
+                if mode == 0 {
+                    Section("Game Information") {
+                        TextField("Game Name (e.g. Sekiro)", text: $gameTitle)
+                        TextField("Executable Path (e.g. C:\\Games\\Game\\game.exe)", text: $exePath)
+                        TextField("Arguments (optional, e.g. -windowed)", text: $launchArgs)
+                        TextField("Steam AppID (optional, e.g. 814380)", text: $steamAppId)
+                            .keyboardType(.numberPad)
+                        Toggle("64-Bit Executable (ARM64EC)", isOn: $is64Bit)
+                    }
+
+                    Section {
+                        Button("Create Game Launcher") {
+                            guard !gameTitle.isEmpty && !exePath.isEmpty else { return }
+                            GameLibraryManager.shared.addLuaGame(
+                                id: gameTitle.lowercased().replacingOccurrences(of: " ", with: "_"),
+                                name: gameTitle,
+                                exePath: exePath,
+                                args: launchArgs,
+                                appId: steamAppId.isEmpty ? nil : steamAppId,
+                                is64Bit: is64Bit
+                            )
+                            isPresented = false
+                        }
+                        .disabled(gameTitle.isEmpty || exePath.isEmpty)
+                    }
+                } else if mode == 1 {
+                    Section("Paste Steam appmanifest_<appid>.acf") {
+                        TextEditor(text: $manifestContent)
+                            .frame(height: 180)
+                            .font(.system(size: 12, design: .monospaced))
+                    }
+                    Section {
+                        Button("Import Steam Manifest") {
+                            GameLibraryManager.shared.importManifestContent(manifestContent)
+                            isPresented = false
+                        }
+                        .disabled(manifestContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                } else {
+                    Section("Download Game Files / Archive (Background Support)") {
+                        TextField("Game Name", text: $downloadGameName)
+                        TextField("Direct Download URL (.zip / .exe)", text: $downloadUrl)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                    }
+
+                    Section {
+                        Button("Start Background Download") {
+                            guard let url = URL(string: downloadUrl.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+                            let title = downloadGameName.isEmpty ? "Game" : downloadGameName
+                            GameDownloadManager.shared.startDownload(
+                                id: UUID().uuidString,
+                                title: title,
+                                from: url
+                            )
+                            isPresented = false
+                        }
+                        .disabled(downloadUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+
+                    Section("Active Downloads") {
+                        ActiveDownloadsListView()
+                    }
+                }
+            }
+            .navigationTitle("Add Game / Tool")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Cancel") { isPresented = false }
+                }
+            }
+        }
+    }
+}
+
+struct ActiveDownloadsListView: View {
+    @ObservedObject private var downloader = GameDownloadManager.shared
+
+    var body: some View {
+        if downloader.activeDownloads.isEmpty {
+            Text("No active downloads")
+                .foregroundColor(.secondary)
+                .font(.caption)
+        } else {
+            ForEach(Array(downloader.activeDownloads.values), id: \.id) { dl in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(dl.title).font(.subheadline).bold()
+                        Spacer()
+                        Text(dl.status).font(.caption2).foregroundColor(.secondary)
+                    }
+                    ProgressView(value: dl.progress)
+                }
+                .padding(.vertical, 4)
+            }
+        }
     }
 }
 
