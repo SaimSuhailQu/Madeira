@@ -86,6 +86,33 @@ else
   echo "Wine ARM64EC headers: cached"
 fi
 
+# Ensure essential PE DLLs like gdiplus.dll are compiled and bundled for arm64ec-windows and aarch64-windows
+ARM64EC_OUT="$ROOT/app/Madeira/arm64ec-windows"
+AARCH64_OUT="$ROOT/app/Madeira/aarch64-windows"
+if [[ ! -f "$ARM64EC_OUT/gdiplus.dll" || ! -f "$AARCH64_OUT/gdiplus.dll" ]]; then
+  echo "Building gdiplus.dll for ARM64EC and AArch64..."
+  (
+    cd "$WINE/build-arm64ec"
+    make -j"$JOBS" dlls/gdiplus || true
+  )
+  if [[ -f "$WINE/build-arm64ec/dlls/gdiplus/arm64ec-windows/gdiplus.dll" ]]; then
+    mkdir -p "$ARM64EC_OUT"
+    llvm-strip --strip-debug "$WINE/build-arm64ec/dlls/gdiplus/arm64ec-windows/gdiplus.dll" -o "$ARM64EC_OUT/gdiplus.dll" 2>/dev/null || \
+      cp -f "$WINE/build-arm64ec/dlls/gdiplus/arm64ec-windows/gdiplus.dll" "$ARM64EC_OUT/gdiplus.dll"
+    echo "gdiplus.dll (arm64ec): copied to $ARM64EC_OUT"
+  fi
+  (
+    cd "$WINE/build-macos"
+    make -j"$JOBS" dlls/gdiplus || true
+  )
+  if [[ -f "$WINE/build-macos/dlls/gdiplus/aarch64-windows/gdiplus.dll" ]]; then
+    mkdir -p "$AARCH64_OUT"
+    llvm-strip --strip-debug "$WINE/build-macos/dlls/gdiplus/aarch64-windows/gdiplus.dll" -o "$AARCH64_OUT/gdiplus.dll" 2>/dev/null || \
+      cp -f "$WINE/build-macos/dlls/gdiplus/aarch64-windows/gdiplus.dll" "$AARCH64_OUT/gdiplus.dll"
+    echo "gdiplus.dll (aarch64): copied to $AARCH64_OUT"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # ml777: OPTIONAL 32-bit (WoW64) PE set — i386 games, apps and the real
 # 32-bit Steam client.
