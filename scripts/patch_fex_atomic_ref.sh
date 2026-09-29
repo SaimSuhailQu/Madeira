@@ -230,4 +230,24 @@ with open('$CORE_CPP', 'w') as f:
 " 2>/dev/null || true
 fi
 
+# 6. Patch AllocatorHooks.cpp so IOS_RPM_GUARD() is always defined
+ALLOC_HOOKS="$FEX_DIR/FEXCore/Source/Utils/AllocatorHooks.cpp"
+if [ -f "$ALLOC_HOOKS" ]; then
+  python3 -c "
+with open('$ALLOC_HOOKS', 'r') as f:
+    c = f.read()
+
+target = '#else\nvoid InitializeThread() {}'
+replacement = '''#else
+#ifndef IOS_RPM_GUARD
+#define IOS_RPM_GUARD() ((void)0)
+#endif
+void InitializeThread() {}'''
+if target in c and '#ifndef IOS_RPM_GUARD' not in c:
+    c = c.replace(target, replacement)
+    with open('$ALLOC_HOOKS', 'w') as f:
+        f.write(c)
+" 2>/dev/null || true
+fi
+
 echo "Successfully patched FEX for atomic_ref and iOS guards"
