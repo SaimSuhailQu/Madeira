@@ -57,6 +57,25 @@ else
   echo "Wine host tree: cached"
 fi
 
+# Madeira's iOS unix-side libraries (ntdll-unix, win32u-unix) need widl-generated
+# headers that `make include` may not produce if no in-tree consumer triggers them.
+# Verify the headers dwrite and winegstreamer's include chains pull in, and build
+# any that are missing explicitly.
+NEED_HEADERS=(
+  objidlbase.h wtypes.h mmreg.h dshow.h mfobjects.h mftransform.h dvdmedia.h
+  vfw.h strmif.h amvideo.h evr.h d3d9.h d3d9types.h d3d9caps.h
+)
+MISSING_HEADERS=()
+for h in "${NEED_HEADERS[@]}"; do
+  if [[ ! -f "$WINE/build-macos/include/$h" ]]; then
+    MISSING_HEADERS+=("include/$h")
+  fi
+done
+if [[ ${#MISSING_HEADERS[@]} -gt 0 ]]; then
+  echo "Building ${#MISSING_HEADERS[@]} missing widl-generated headers..."
+  make -C "$WINE/build-macos" -j"$JOBS" "${MISSING_HEADERS[@]}"
+fi
+
 # Madeira's ntdll iOS build currently includes generated dwrite headers from a
 # directory named build-arm64ec. Configure that tree reproducibly and build only
 # the generated headers required by the iOS static libraries; PE binaries are
@@ -72,7 +91,7 @@ fi
 
 if [[ ! -f "$WINE/build-arm64ec/include/dwrite.h" || ! -f "$WINE/build-arm64ec/include/dwrite_3.h" ]]; then
   echo "Generating Wine ARM64EC headers..."
-  make -C "$WINE/build-arm64ec" -j"$JOBS" include/dwrite.h include/dwrite_3.h
+  make -C "$WINE/build-arm64ec" -j"$JOBS" include
 else
   echo "Wine ARM64EC headers: cached"
 fi
