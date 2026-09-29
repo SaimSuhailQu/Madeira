@@ -59,6 +59,10 @@ void ios_wineserver_wake(void)
 #include <stdlib.h>
 #include <stdint.h>
 #include <poll.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #ifdef HAVE_LINUX_MAJOR_H
 #include <linux/major.h>
 #endif
