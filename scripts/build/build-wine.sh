@@ -67,6 +67,16 @@ NEED_HEADERS=(
 )
 MISSING_HEADERS=()
 for h in "${NEED_HEADERS[@]}"; do
+  # Plain C headers (mmreg.h, dshow.h, d3d9.h, ...) live in the source tree and
+  # have no make rule in the build tree. Only IDL-generated headers can be
+  # (and need to be) built, so skip anything that is not backed by an .idl.
+  if [[ -f "$WINE/include/$h" ]]; then
+    continue
+  fi
+  if [[ ! -f "$WINE/include/${h%.h}.idl" ]]; then
+    echo "WARNING: $h has neither a source header nor an .idl in wine/include; skipping" >&2
+    continue
+  fi
   if [[ ! -f "$WINE/build-macos/include/$h" ]]; then
     MISSING_HEADERS+=("include/$h")
   fi
