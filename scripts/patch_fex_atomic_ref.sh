@@ -316,4 +316,63 @@ if target in c and '#ifndef IOS_RPM_GUARD' not in c:
 " 2>/dev/null || true
 fi
 
+# 7. Patch Arm64.cpp: Guard Windows-specific MEMORY_BASIC_INFORMATION and VirtualQuery on non-Windows/iOS
+ARM64_CPP="$FEX_DIR/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp"
+if [ -f "$ARM64_CPP" ]; then
+  python3 -c "
+with open('$ARM64_CPP', 'r') as f:
+    c = f.read()
+
+target = '''  MEMORY_BASIC_INFORMATION mbi {};
+  const char* type = \"?\";
+  if (VirtualQuery(reinterpret_cast<LPCVOID>(GPRs[AddressReg]), &mbi, sizeof(mbi))) {
+    type = mbi.Type == MEM_IMAGE ? \"MEM_IMAGE\" : mbi.Type == MEM_MAPPED ? \"MEM_MAPPED\" : \"MEM_PRIVATE\";
+  }
+  LogMan::Msg::EFmt(\"[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} \"
+                    \"crosses16B={} | region base={} size={:#x} prot={:#x} type={} state={:#x}\",
+                    Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+                    (GPRs[AddressReg] & 15) ? \"yes\" : \"no\", mbi.BaseAddress, mbi.RegionSize,
+                    mbi.Protect, type, mbi.State);'''
+
+replacement = '''#if defined(_WIN32)
+  MEMORY_BASIC_INFORMATION mbi {};
+  const char* type = \"?\";
+  if (VirtualQuery(reinterpret_cast<LPCVOID>(GPRs[AddressReg]), &mbi, sizeof(mbi))) {
+    type = mbi.Type == MEM_IMAGE ? \"MEM_IMAGE\" : mbi.Type == MEM_MAPPED ? \"MEM_MAPPED\" : \"MEM_PRIVATE\";
+  }
+  LogMan::Msg::EFmt(\"[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} \"
+                    \"crosses16B={} | region base={} size={:#x} prot={:#x} type={} state={:#x}\",
+                    Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+                    (GPRs[AddressReg] & 15) ? \"yes\" : \"no\", mbi.BaseAddress, mbi.RegionSize,
+                    mbi.Protect, type, mbi.State);
+#else
+  LogMan::Msg::EFmt(\"[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} crosses16B={}\",
+                    Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+                    (GPRs[AddressReg] & 15) ? \"yes\" : \"no\");
+#endif'''
+
+if target in c:
+    c = c.replace(target, replacement)
+    with open('$ARM64_CPP', 'w') as f:
+        f.write(c)
+" 2>/dev/null || true
+fi
+
+# 8. Patch AllocWatch.cpp: Silence unused EventName warning
+ALLOC_WATCH_CPP="$FEX_DIR/FEXCore/Source/Utils/AllocWatch.cpp"
+if [ -f "$ALLOC_WATCH_CPP" ]; then
+  python3 -c "
+with open('$ALLOC_WATCH_CPP', 'r') as f:
+    c = f.read()
+
+target = 'const char* EventName(uint32_t Event) {'
+replacement = '[[maybe_unused]] static const char* EventName(uint32_t Event) {'
+if target in c:
+    c = c.replace(target, replacement)
+    with open('$ALLOC_WATCH_CPP', 'w') as f:
+        f.write(c)
+" 2>/dev/null || true
+fi
+
 echo "Successfully patched FEX for atomic_ref and iOS guards"
+
