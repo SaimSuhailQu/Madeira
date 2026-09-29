@@ -35,6 +35,9 @@ bash "$ROOT/tools/check-prefix-template.sh" "$ROOT/app/Madeira/prefix-template.t
 "$ROOT/scripts/build/build-fex-ios.sh"
 "$ROOT/scripts/build/build-freetype-ios.sh"
 
+log "Building FFmpeg for iOS"
+"$ROOT/build/ffmpeg/build.sh"
+
 log "Building GnuTLS stack for iOS"
 "$ROOT/build/gnutls-ios/build.sh"
 "$ROOT/scripts/build/sync-gnutls-libs.sh"

@@ -93,6 +93,26 @@ jobs:
       - name: Clean FEX build tree
         run: rm -rf FEX/build-ios
 
+      - name: Cache FFmpeg iOS build
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchains/ffmpeg-ios
+            build/ffmpeg/obj
+          key: ${{ runner.os }}-ffmpeg-ios-v1-${{ hashFiles('build/ffmpeg/build.sh', 'build/ffmpeg/src/SHA256SUMS') }}
+          restore-keys: |
+            ${{ runner.os }}-ffmpeg-ios-v1-
+
+      - name: Cache FreeType iOS build
+        uses: actions/cache@v4
+        with:
+          path: |
+            research/freetype
+            build/freetype-ios/build
+          key: ${{ runner.os }}-freetype-ios-v1-${{ hashFiles('scripts/build/build-freetype-ios.sh', 'build/freetype-ios/build.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-freetype-ios-v1-
+
       - name: Cache Wine host build
         uses: actions/cache@v4
         with:
@@ -180,6 +200,19 @@ jobs:
             ' sh {} \;
           else
             echo "No DXMT compiler log directory exists."
+          fi
+
+      - name: Print failed ntdll-unix compiler logs
+        if: failure()
+        shell: bash
+        run: |
+          if [ -d build/ntdll-unix/obj ]; then
+            find build/ntdll-unix/obj -type f -name '*.err' -size +0c -print -exec sh -c '
+              echo "===== $1 ====="
+              cat "$1"
+            ' sh {} \;
+          else
+            echo "No ntdll-unix compiler log directory exists."
           fi
 
       - name: Upload IPA Artifact

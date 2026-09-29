@@ -41,6 +41,7 @@ compile_one() {
         SUCCEEDED=$((SUCCEEDED + 1))
     else
         echo "FAILED"
+        cat "$OBJ_DIR/$name.err" 2>/dev/null || true
         FAILED=$((FAILED + 1))
         FAILED_FILES="$FAILED_FILES $name"
     fi
@@ -76,6 +77,7 @@ compile_unixlib() {
         SUCCEEDED=$((SUCCEEDED + 1))
     else
         echo "FAILED"
+        cat "$OBJ_DIR/$name.err" 2>/dev/null || true
         FAILED=$((FAILED + 1))
         FAILED_FILES="$FAILED_FILES $name"
     fi
@@ -145,6 +147,7 @@ if xcrun -sdk iphoneos clang \
     SUCCEEDED=$((SUCCEEDED + 1))
 else
     echo "FAILED"
+    cat "$OBJ_DIR/wg_parser_apple_ios.err" 2>/dev/null || true
     FAILED=$((FAILED + 1))
     FAILED_FILES="$FAILED_FILES wg_parser_apple_ios"
 fi
@@ -188,6 +191,18 @@ echo ""
 echo "Results: $SUCCEEDED succeeded, $FAILED failed"
 if [ -n "$FAILED_FILES" ]; then
     echo "Failed:$FAILED_FILES"
+    echo ""
+    echo "=== Compiler error logs ==="
+    for f in $FAILED_FILES; do
+        errfile="$OBJ_DIR/$f.err"
+        if [ -s "$errfile" ]; then
+            echo "--- $f ---"
+            cat "$errfile"
+            echo ""
+        fi
+    done
+    echo "Aborting: cannot build libntdll_unix.a with missing objects."
+    exit 1
 fi
 
 echo ""
