@@ -51,8 +51,8 @@ if [[ ! -f "$WINE/build-macos/Makefile" ]]; then
 fi
 
 if [[ ! -f "$WINE/build-macos/include/dwrite.h" || ! -x "$WINE/build-macos/tools/winebuild/winebuild" ]]; then
-  echo "Building Wine host tree..."
-  make -C "$WINE/build-macos" -j"$JOBS"
+  echo "Building Wine host tools and headers..."
+  make -C "$WINE/build-macos" -j"$JOBS" tools include
 else
   echo "Wine host tree: cached"
 fi
