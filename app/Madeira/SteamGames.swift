@@ -419,6 +419,9 @@ struct SteamGamesSection: View {
     var part: Part = .all
     /// Opens a game's Game details page (LibraryView's details sheet).
     let open: (LibraryEntry) -> Void
+    /// Starts an installed game through Madeira Dock right away, with its
+    /// library entry as the launch profile (one-click play).
+    var startDock: (DockGame, Bool, LibraryEntry?) -> Void = { _, _, _ in }
     @ObservedObject private var model = SteamGamesModel.shared
     @ObservedObject private var steam = SteamOwnedLibrary.shared
     @ObservedObject private var library = LibraryModel.shared
@@ -564,9 +567,20 @@ struct SteamGamesSection: View {
 
     /// An installed game (by Madeira's download or by Steam's client) opens its
     /// Game details page; any other game opens its download sheet.
+    /// One click plays: an installed game launches through Dock right away; the
+    /// details page opens by itself only when something still blocks the start
+    /// (update running, sign-in missing), where its own gate explains why. A
+    /// game that is not installed opens its download sheet — the expected
+    /// first click.
     private func select(_ item: SteamGamesRules.Item) {
         if let installed = item.installed {
-            open(LibraryModel.shared.steamEntry(installed, title: item.name))
+            let entry = LibraryModel.shared.steamEntry(installed, title: item.name)
+            if entry.startsSteamGameDirectly || SteamGamesRules.blocker(installed: true,
+                    client: MadeiraDock.clientInstalled, signedIn: SteamSignIn.isSignedIn) != nil {
+                open(entry)
+            } else {
+                startDock(installed, MadeiraDockModel.shared.compactPool, entry)
+            }
         } else {
             selected = SteamGameSelection(id: item.id)
         }

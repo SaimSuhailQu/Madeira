@@ -1698,6 +1698,25 @@ struct LibrarySectionHeader<Trailing: View>: View {
 
 /// A section's cards or rows in the library's layout ("cards", "compact",
 /// "list" or "compactList"): every section of the library page uses it.
+/// A slim non-blocking progress line pinned above the tab bar while the
+/// library prepares something in the background (a zip import, Steam's
+/// client components).
+struct LibraryProgressBanner: View {
+    let text: String
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text(text).font(.footnote).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(.thinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+        .padding(.horizontal, 24).padding(.bottom, 8)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
 struct LibraryCells<Item: Identifiable, Cell: View>: View {
     let items: [Item]
     let layout: String
@@ -1728,8 +1747,9 @@ struct LibraryView: View {
     var play: (LibraryEntry) -> Void
     var enableJIT: () -> Void
     @ObservedObject private var jitState = LibraryJITState.shared
-    /// Madeira Dock's start, for Settings › Steam (Onboarding.swift).
-    var startDock: (DockGame, Bool) -> Void = { _, _ in }
+    /// Madeira Dock's start, for Settings › Steam (Onboarding.swift) and one-click
+    /// play on the Steam section's installed cards; the entry is the launch profile.
+    var startDock: (DockGame, Bool, LibraryEntry?) -> Void = { _, _, _ in }
     /// First-run setup (Onboarding.swift).
     @ObservedObject private var onboarding = OnboardingModel.shared
     @State private var browser = false
@@ -1756,6 +1776,9 @@ struct LibraryView: View {
     @ObservedObject private var steamGames = SteamGamesModel.shared
     // In-app game import (GameImport.swift): progress and the imported folder.
     @ObservedObject private var gameImport = GameImportModel.shared
+    // Steam-component provisioning on a first Dock start (MadeiraDockView.swift):
+    // observed so the progress banner tracks the download live.
+    @ObservedObject private var dockModel = MadeiraDockModel.shared
     @ObservedObject private var steamLibrary = SteamOwnedLibrary.shared
     private var entries: [LibraryEntry] {
         // Steam games are listed in their own section (SteamGames.swift).
@@ -1915,7 +1938,7 @@ struct LibraryView: View {
             switch sheet {
             case .allSettings: AllSettingsView()
             case .steamSignIn: SteamSignInView()
-            case .dock: MadeiraDockView(start: startDock)
+            case .dock: MadeiraDockView(start: { startDock($0, $1) })
             }
         }
     }
@@ -1945,7 +1968,7 @@ struct LibraryView: View {
                 let steamFirst = MadeiraDock.enabled && SteamGamesSection.hasInstalled
                 if steamFirst {
                     SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
-                                      part: .installed, open: { selected = $0 })
+                                      part: .installed, open: { selected = $0 }, startDock: startDock)
                 }
                 if SteamGamesSection.shown {
                     VStack(alignment: .leading, spacing: 14) {
@@ -1965,7 +1988,7 @@ struct LibraryView: View {
                     }
                     if MadeiraDock.enabled {
                         SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
-                                          part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
+                                          part: steamFirst ? .notInstalled : .all, open: { selected = $0 }, startDock: startDock)
                     }
                 } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil }).isEmpty {
                     ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, or import its .zip with + › Import game."))
@@ -2025,6 +2048,16 @@ struct LibraryView: View {
         .alert("Library", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
+        .overlay(alignment: .bottom) {
+            // Long preparations without a window of their own — a first Dock start
+            // fetching Valve's client components, a zip import — stay visible here
+            // instead of looking like a dead tap.
+            if gameImport.importing {
+                LibraryProgressBanner(text: gameImport.progress.isEmpty ? "Importing game…" : gameImport.progress)
+            } else if dockModel.preparing, !MadeiraDock.clientInstalled {
+                LibraryProgressBanner(text: dockModel.progress.isEmpty ? "Preparing Steam…" : dockModel.progress)
+            }
+        }
         .onChange(of: scenePhase) { _, phase in if phase == .active { model.refreshFlag() } }
         .onAppear { if focused == nil { focused = LibraryEntry.desktopID } }
         .onChange(of: focused) { _, id in
@@ -2039,7 +2072,10 @@ struct LibraryView: View {
         }
     }
     private func libraryItem(_ entry: LibraryEntry, list: Bool, dense: Bool = false) -> some View {
-        Button { selected = entry } label: {
+        // One click plays: the card launches straight away; its details page is a
+        // long press away. A launch that cannot start reports through the
+        // library's alert (LibraryModel.error), as the details page's Play would.
+        Button { play(entry) } label: {
             Group {
                 if list && dense {
                     // One short row per game.
@@ -2071,6 +2107,9 @@ struct LibraryView: View {
                 }
             }.foregroundStyle(.primary)
         }.libraryCardButtonStyle(grid: !list)
+            .contextMenu {
+                Button { selected = entry } label: { Label("Game details", systemImage: "info.circle") }
+            }
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(focused == entry.id && controller.connected ? Color.accentColor : .clear, lineWidth: 2))
             .id(entry.id)
             .task(id: entry.id, priority: .utility) { await model.refreshMetadata(entry.id) }

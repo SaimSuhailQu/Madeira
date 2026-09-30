@@ -99,7 +99,7 @@ require('dock.prepareClient()' in block(view, 'private var dockClientPage'), "co
 # ------------------------------------------------------------------ static: sign-in and tokens
 require('SteamSignInView()' in view and 'SteamSignInView()' in settings_section, "sign-in through #45's sheet")
 require('signIn.signOut()' in settings_section, "sign-out through #45's model")
-require('MadeiraDockView(start: startDock)' in settings_section, "Settings opens Dock's sheet")
+require('MadeiraDockView(start: { startDock($0, $1) })' in settings_section, "Settings opens Dock's sheet")
 for forbidden in ['SteamTokenStore', 'credentialsForDock', 'refreshToken', 'SecItem', 'kSec', 'accessToken']:
     require(forbidden not in onboarding, f'Onboarding.swift: no {forbidden} (tokens only via the sign-in store)')
 for line in onboarding.splitlines():
@@ -119,7 +119,7 @@ require('.exe' not in rules, 'rules key nothing on program names')
 
 # ------------------------------------------------------------------ static: Dock from the library
 start = block(content, 'private func startDock(_ game: DockGame, compactPool: Bool')
-require('LibraryView(play: launchLibraryEntry, enableJIT: enableJITViaStikDebug,\n                                startDock: { startDock($0, compactPool: $1) })' in content,
+require('LibraryView(play: playEntry, enableJIT: enableJITViaStikDebug,\n                                startDock: { playDock($0, $1, profile: $2) })' in content,
         "ContentView hands Dock's start to the library")
 held = start.index('LibraryModel.sessionsThisRun > 0, MadeiraConfig.flag("MADEIRA_ONE_SESSION_PER_RUN")')
 require(held < start.index('MadeiraDock.writeHandoff('), 'a held Dock start writes no sign-in transfer')

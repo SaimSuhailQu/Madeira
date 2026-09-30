@@ -1214,8 +1214,8 @@ struct ContentView: View {
                 if library.enabled && library.current != nil {
                     sessionBody
                 } else if library.enabled {
-                    LibraryView(play: launchLibraryEntry, enableJIT: enableJITViaStikDebug,
-                                startDock: { startDock($0, compactPool: $1) })
+                    LibraryView(play: playEntry, enableJIT: enableJITViaStikDebug,
+                                startDock: { playDock($0, $1, profile: $2) })
                 } else if vSizeClass == .compact {
                     landscapeBody
                 } else {
@@ -2237,6 +2237,51 @@ struct ContentView: View {
                 logStore.log("Failed to enable JIT via StikDebug", level: .error)
             }
         }
+    }
+
+    // One-click play: a tap on a game card arms JIT through StikDebug when no
+    // debugger is attached yet, then launches. The first tap of a run may hop
+    // through StikDebug's URL scheme; after that the session runs on its own.
+    @State private var jitPendingEntry: LibraryEntry?
+    @State private var jitPendingDock: (game: DockGame, compactPool: Bool, profile: LibraryEntry?)?
+
+    /// Arms JIT if needed, then plays a library game.
+    private func playEntry(_ entry: LibraryEntry) {
+        guard jit_check_debugged() else {
+            jitPendingEntry = entry
+            logStore.log("Arming JIT for the launch (StikDebug)…")
+            StikJITHelper.enableJIT { success in
+                DispatchQueue.main.async {
+                    guard let entry = jitPendingEntry else { return }
+                    jitPendingEntry = nil
+                    if success, jit_check_debugged() { launchLibraryEntry(entry) }
+                    else { library.error = "Enable JIT before playing." }
+                }
+            }
+            return
+        }
+        launchLibraryEntry(entry)
+    }
+
+    /// Arms JIT if needed, then starts a Steam game through Madeira Dock.
+    private func playDock(_ game: DockGame, _ compactPool: Bool, profile: LibraryEntry?) {
+        guard jit_check_debugged() else {
+            jitPendingDock = (game, compactPool, profile)
+            logStore.log("Arming JIT for the Dock launch (StikDebug)…")
+            StikJITHelper.enableJIT { success in
+                DispatchQueue.main.async {
+                    guard let pending = jitPendingDock else { return }
+                    jitPendingDock = nil
+                    if success, jit_check_debugged() {
+                        startDock(pending.game, compactPool: pending.compactPool, profile: pending.profile)
+                    } else {
+                        library.error = "Enable JIT before playing."
+                    }
+                }
+            }
+            return
+        }
+        startDock(game, compactPool: compactPool, profile: profile)
     }
 
     /// Play in the library (Library.swift): checks that a session can start,
