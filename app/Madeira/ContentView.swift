@@ -2950,6 +2950,18 @@ struct ContentView: View {
         // is handed to Valve's client, and it stays off until the Dock session has ended
         // (SteamOwnedLibrary.prepareDock / dockEnded, SteamConnectionGate).
         Task { @MainActor in
+            // The download needs a network and 73 MB of the user's patience; find out
+            // before it, not after, that the account is not signed in at all.
+            guard SteamSignIn.isSignedIn else {
+                fail(DockError.message("Sign in to Steam in Madeira before starting Dock.")); return
+            }
+            do {
+                // Valve's client components on demand: a first Dock start downloads them
+                // (SteamRuntime.swift, pinned SHA-256 from Valve's own update servers)
+                // instead of sending the player to Settings. No session runs yet; the
+                // installer refuses while one does (SteamRuntimeFiles.Failure.activeSession).
+                try await MadeiraDockModel.shared.installClientIfNeeded()
+            } catch { fail(error); return }
             await SteamOwnedLibrary.shared.prepareDock()
             do {
                 // The launch state may have changed while the connection closed.

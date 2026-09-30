@@ -1007,7 +1007,7 @@ struct SteamEntrySection: View {
                 }
             } else {
                 if !dock.clientInstalled {
-                    Text("Madeira Dock needs Valve's client components. Download them in Settings › Steam › Madeira Dock.")
+                    Text("Valve's client components (about 73 MB) are downloaded before the first launch.")
                         .font(.caption).foregroundStyle(.orange)
                 }
                 Toggle("Smaller JIT pool (512 MB) for this launch", isOn: $dock.compactPool)

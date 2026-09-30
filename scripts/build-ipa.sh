@@ -54,6 +54,9 @@ log "Building Wine unix libraries"
 "$ROOT/scripts/build/build-shader-headers.sh"
 "$ROOT/scripts/build/build-dxmt-ios.sh"
 
+log "Building Madeira Dock host"
+"$ROOT/build/madeira-dock/build.sh"
+
 if [[ "${MADEIRA_BUILD_I386:-1}" == "1" ]]; then
   log "Building i386 (WoW64) PE set"
   "$ROOT/build/wine-i386/build.sh"

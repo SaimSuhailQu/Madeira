@@ -14,10 +14,15 @@ touch mapping).
 
 ## Adding games
 
-Copy a game's whole folder into **Madeira › wine › drive_c** with the Files app,
-tap **+** and choose its `.exe`. Only x86 and x64 PE executables inside drive_c
-can be added; the library stores the path relative to drive_c, so a changed
-app container path does not break entries. Adding an entry installs nothing.
+Tap **+** to add a game. **Import game (.zip)…** picks a game archive and
+extracts it into drive_c/Games (plain DRM-free titles and fan re-packages;
+an archive with one top-level folder imports as that folder, progress shows
+per file), then the executable browser opens so you choose the game's
+`.exe`. Or copy a game's whole folder into **Madeira › wine › drive_c** with
+the Files app and use **Choose an installed executable…**. Only x86 and x64
+PE executables inside drive_c can be added; the library stores the path
+relative to drive_c, so a changed app container path does not break entries.
+Adding an entry installs nothing.
 
 The library reads the executable's PE imports (and those of the DLLs next to
 it, plus bounded scans for dynamically loaded renderer DLL names) to show a

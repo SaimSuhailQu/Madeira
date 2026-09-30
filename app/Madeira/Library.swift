@@ -1733,6 +1733,8 @@ struct LibraryView: View {
     /// First-run setup (Onboarding.swift).
     @ObservedObject private var onboarding = OnboardingModel.shared
     @State private var browser = false
+    /// In-app game import: pick a game .zip, extract it into drive_c/Games (GameImport.swift).
+    @State private var importing = false
     @State private var selected: LibraryEntry?
     @State private var search = ""
     /// The Settings tab's own search text, kept apart from the library's.
@@ -1752,6 +1754,8 @@ struct LibraryView: View {
     @AppStorage("madeiraLibraryHideOthers") private var hideOthers = false
     // The sections follow the Steam section's games and sign-in (SteamGames.swift).
     @ObservedObject private var steamGames = SteamGamesModel.shared
+    // In-app game import (GameImport.swift): progress and the imported folder.
+    @ObservedObject private var gameImport = GameImportModel.shared
     @ObservedObject private var steamLibrary = SteamOwnedLibrary.shared
     private var entries: [LibraryEntry] {
         // Steam games are listed in their own section (SteamGames.swift).
@@ -1822,7 +1826,12 @@ struct LibraryView: View {
                 }
             } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
         }
-        ToolbarItem(placement: .topBarTrailing) { Button { browser = true } label: { Label("Add executable", systemImage: "plus") } }
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Button { browser = true } label: { Label("Choose an installed executable…", systemImage: "app.dashed") }
+                Button { importing = true } label: { Label("Import game (.zip)…", systemImage: "square.and.arrow.down.on.square") }
+            } label: { Label("Add game", systemImage: "plus") }
+        }
     }
     @ToolbarContentBuilder private var settingsToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
@@ -1947,7 +1956,7 @@ struct LibraryView: View {
                             EmptyView()
                         } else if entries.isEmpty {
                             Text(search.isEmpty
-                                 ? "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."
+                                 ? "Copy a game's folder into Madeira › wine › drive_c with the Files app, or import its .zip with + › Import game."
                                  : "No other games match your search.")
                                 .foregroundStyle(.secondary)
                         } else {
@@ -1959,7 +1968,7 @@ struct LibraryView: View {
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
                     }
                 } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil }).isEmpty {
-                    ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
+                    ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, or import its .zip with + › Import game."))
                 } else {
                     cells(entries, width: viewport.size.width)
                 }
@@ -1975,6 +1984,7 @@ struct LibraryView: View {
             let ids = [LibraryEntry.desktopID] + items.map(\.id)
             let index = ids.firstIndex(where: { $0 == focused }) ?? 0
             if command == "add" { browser = true }
+            if command == "import" { importing = true }
             else if command == "accept" {
                 if index == 0 { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry }
                 else { selected = items[index - 1] }
@@ -1988,6 +1998,17 @@ struct LibraryView: View {
             NavigationStack { ExecutableBrowser(folder: LibraryModel.drive) { entry in
                 model.save(entry); browser = false; selected = entry
             } }
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.zip]) { result in
+            if case .success(let url) = result { gameImport.importArchive(at: url) }
+        }
+        .sheet(isPresented: Binding(get: { gameImport.importedFolder != nil },
+                                   set: { if !$0 { gameImport.importedFolder = nil } })) {
+            if let folder = gameImport.importedFolder {
+                NavigationStack { ExecutableBrowser(folder: folder) { entry in
+                    model.save(entry); gameImport.importedFolder = nil; selected = entry
+                } }
+            }
         }
         .sheet(item: $selected) { entry in
             // The details page stays up until the session's starting screen takes
@@ -2140,6 +2161,9 @@ struct LibraryDetail: View {
             let installed = SteamGamesModel.shared.games.first { $0.id == appID }?.installed ?? false
             if entry.startsSteamGameDirectly {
                 if let blocker = SteamDirectStart.blocker(installed: installed, program: entry.steamProgram) { error = blocker; return }
+            } else if MadeiraDock.bundled, !MadeiraDock.clientInstalled {
+                // Valve's client components are provisioned on demand by the Dock start;
+                // only the rest of the gate (install state, sign-in) still blocks here.
             } else if let blocker = SteamGamesRules.blocker(installed: installed, client: MadeiraDock.clientInstalled, signedIn: SteamSignIn.isSignedIn) {
                 error = blocker; return
             }

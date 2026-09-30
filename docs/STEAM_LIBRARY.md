@@ -66,7 +66,9 @@ limit, x87, CPU-count, anisotropy, overlay, live-log and touch-control
 settings apply to the session (the in-game menu saves changes back to the
 entry). The profile never replaces what Dock starts. Play is refused, with the
 reason, while an update runs, before Steam marks the game fully installed,
-without Valve's client components or without a sign-in. Launch arguments are
+or without a sign-in; Valve's client components no longer need a manual
+download first — a Dock start provisions them on demand (the same pinned,
+verified download as Settings › Steam › Madeira Dock). Launch arguments are
 not offered: Dock starts Steam's own launch option. The session keeps Dock's
 starting screen until the game's own window is shown (`docs/MADEIRA_DOCK.md`,
 "Starting screen").

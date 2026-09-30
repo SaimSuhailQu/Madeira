@@ -69,6 +69,21 @@ final class MadeiraDockModel: ObservableObject {
         }
     }
 
+    /// Installs Valve's client components on demand before a Dock launch
+    /// (ContentView.startDock). Same verified download as the sheet's button;
+    /// throws when a session is running or the download cannot be verified.
+    func installClientIfNeeded() async throws {
+        guard !MadeiraDock.clientInstalled else { return }
+        guard !preparing else { throw DockError.message("Valve's client components are already being prepared. Wait for them to finish.") }
+        preparing = true; error = nil; progress = "Starting…"
+        defer { preparing = false }
+        try await SteamRuntimeInstaller.shared.prepare(prefix: MadeiraDock.prefix) { text in
+            await MainActor.run { self.progress = text }
+        }
+        SteamLog.event("[dock-setup] client components installed for launch")
+        refresh()
+    }
+
     /// Follows the host's report until it records a result, or the session ends
     /// without one, then removes any unconsumed sign-in transfer.
     func watchReport() {
@@ -154,7 +169,7 @@ struct MadeiraDockView: View {
                         Button("Download Valve's client components (about 73 MB)") { dock.prepareClient() }
                     }
                 } header: { Text("Steam client") } footer: {
-                    Text("Downloaded from Valve's update servers and checked against pinned SHA-256 sums. Existing Steam files are kept.")
+                    Text("Downloaded from Valve's update servers and checked against pinned SHA-256 sums. Existing Steam files are kept. A Dock start downloads them automatically when they are missing.")
                 }
                 Section {
                     if dock.games.isEmpty {
@@ -168,7 +183,7 @@ struct MadeiraDockView: View {
                                 if !game.installed { Text("Not fully installed").font(.caption).foregroundStyle(.secondary) }
                             }
                         }
-                        .disabled(!game.installed || !dock.clientInstalled || !signIn.signedIn)
+                        .disabled(!game.installed || !signIn.signedIn)
                     }
                     Toggle("Smaller JIT pool (512 MB) for this launch", isOn: $dock.compactPool)
                 } header: { Text("Installed games") } footer: {
