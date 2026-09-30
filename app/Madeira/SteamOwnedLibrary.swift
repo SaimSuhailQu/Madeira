@@ -183,6 +183,9 @@ final class SteamOwnedLibrary: ObservableObject {
     /// Steam's playtime and last played, by App ID.
     @Published private(set) var playtime: [Int: SteamPlaytime] = [:]
     @Published var error: String?
+    /// Free-to-play apps claimed this run (they appear on the next refresh).
+    @Published private(set) var claimedFree: Set<Int> = []
+    @Published private(set) var claimingFree = false
 
     struct Download: Equatable {
         enum State: Equatable { case queued, active, paused, failed(String) }
@@ -310,6 +313,28 @@ final class SteamOwnedLibrary: ObservableObject {
             await refreshPlaytime()
         } catch {
             handleSessionError(error, context: "library", report: interactive)
+        }
+    }
+
+    // MARK: Free-to-play games
+
+    /// Claims a free-to-play app for the signed-in account over the app's own
+    /// connection: ClientRequestFreeLicense, the message Valve's client sends
+    /// when a player takes a free game. Steam grants the license and the app
+    /// appears with the library refresh that follows; it then installs and
+    /// starts through the normal owned-library path, license checks included.
+    func claimFree(appID: Int) async {
+        guard Self.enabled, signedIn, !inSession, appID > 0, appID <= Int(UInt32.max) else { return }
+        guard !claimingFree else { return }
+        claimingFree = true
+        defer { claimingFree = false }
+        do {
+            let granted = try await session.requestFreeLicense(appID: UInt32(appID))
+            claimedFree.insert(appID)
+            SteamLog.event(granted ? "[steam-free] granted app=\(appID)" : "[steam-free] already owned app=\(appID)")
+            await refreshLibrary(interactive: true)
+        } catch {
+            handleSessionError(error, context: "free license", report: true)
         }
     }
 

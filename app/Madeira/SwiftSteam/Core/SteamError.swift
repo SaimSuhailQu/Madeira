@@ -51,6 +51,8 @@ enum SteamError: LocalizedError, Equatable {
     case checksumMismatch
     case depotKeyNotFound(UInt32)
     case insufficientDiskSpace(needed: UInt64, available: UInt64)
+    /// Steam refused a free-license request; the result code is Valve's.
+    case freeLicenseDenied(appID: Int, result: UInt32)
 
     var errorDescription: String? {
         switch self {
@@ -105,6 +107,10 @@ enum SteamError: LocalizedError, Equatable {
         case .insufficientDiskSpace(let needed, let available):
             return String(format: "Not enough free space: the download needs %.1f GB and %.1f GB is available.",
                           Double(needed) / 1_000_000_000, Double(available) / 1_000_000_000)
+        case .freeLicenseDenied(let appID, let result):
+            return result == 15
+                ? "Steam does not offer app \(appID) for free to this account."
+                : "Steam refused the free game (code \(result))."
         }
     }
 }

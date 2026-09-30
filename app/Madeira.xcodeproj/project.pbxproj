@@ -34,6 +34,7 @@
 		A1000616 /* SwiftSteam/Core/SteamCMSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000616 /* SteamCMSession.swift */; };
 		A100060C /* SwiftSteam/Library/SteamAppInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060C /* SteamAppInfo.swift */; };
 		A100060D /* SwiftSteam/Library/SteamLibraryFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060D /* SteamLibraryFetcher.swift */; };
+		A1000701 /* SwiftSteam/Library/FreeLicense.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000701 /* FreeLicense.swift */; };
 		A1000522 /* SteamKeyValues.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000522 /* SteamKeyValues.swift */; };
 		A1000523 /* SteamRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000523 /* SteamRuntime.swift */; };
 		A1000524 /* DockInstallers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000524 /* DockInstallers.swift */; };
@@ -147,6 +148,7 @@
 		A2000616 /* SteamCMSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamCMSession.swift"; sourceTree = "<group>"; };
 		A200060C /* SteamAppInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Library/SteamAppInfo.swift"; sourceTree = "<group>"; };
 		A200060D /* SteamLibraryFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Library/SteamLibraryFetcher.swift"; sourceTree = "<group>"; };
+		A2000701 /* FreeLicense.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Library/FreeLicense.swift"; sourceTree = "<group>"; };
 		A2000522 /* SteamKeyValues.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamKeyValues.swift"; sourceTree = "<group>"; };
 		A2000523 /* SteamRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamRuntime.swift"; sourceTree = "<group>"; };
 		A2000524 /* DockInstallers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockInstallers.swift"; sourceTree = "<group>"; };
@@ -325,6 +327,7 @@
 				A2000616 /* SteamCMSession.swift */,
 				A200060C /* SteamAppInfo.swift */,
 				A200060D /* SteamLibraryFetcher.swift */,
+				A2000701 /* FreeLicense.swift */,
 				A2000522 /* SteamKeyValues.swift */,
 				A2000523 /* SteamRuntime.swift */,
 				A2000524 /* DockInstallers.swift */,
@@ -558,6 +561,7 @@
 				A1000616 /* SwiftSteam/Core/SteamCMSession.swift in Sources */,
 				A100060C /* SwiftSteam/Library/SteamAppInfo.swift in Sources */,
 				A100060D /* SwiftSteam/Library/SteamLibraryFetcher.swift in Sources */,
+				A1000701 /* SwiftSteam/Library/FreeLicense.swift in Sources */,
 				A1000522 /* SteamKeyValues.swift in Sources */,
 				A1000523 /* SteamRuntime.swift in Sources */,
 				A1000524 /* DockInstallers.swift in Sources */,

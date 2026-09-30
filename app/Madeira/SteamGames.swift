@@ -428,6 +428,7 @@ struct SteamGamesSection: View {
     @AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true
     @State private var selected: SteamGameSelection?
     @State private var showSignIn = false
+    @State private var showFree = false
 
     /// MADEIRA_LIBRARY_COLLAPSE=0: the section titles do not collapse.
     static var collapsible: Bool { MadeiraConfig.flag("MADEIRA_LIBRARY_COLLAPSE") }
@@ -523,6 +524,11 @@ struct SteamGamesSection: View {
                                 cell(item, list: list, dense: dense)
                             }
                         }
+                        Button { showFree = true } label: {
+                            Label("Browse free games…", systemImage: "sparkles")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .padding(.top, 4)
                     }
                 }
             } else {
@@ -545,6 +551,7 @@ struct SteamGamesSection: View {
             }
         }
         .sheet(isPresented: $showSignIn) { SteamSignInView() }
+        .sheet(isPresented: $showFree) { SteamFreeGamesSheet() }
         .alert("Steam", isPresented: Binding(get: { steam.error != nil }, set: { if !$0 { steam.error = nil } })) {
             Button("OK", role: .cancel) { steam.error = nil }
         } message: { Text(steam.error ?? "") }
@@ -1127,4 +1134,78 @@ struct SteamEntrySection: View {
         }
         LogStore.shared.log("[steam-start] app=\(appID) launch-entries=\(options.count) programs=\(found.count) source=\(entry.steamProgramSource ?? "none")")
     }
+}
+
+/// Free-to-play games for the signed-in account: pick one and Madeira asks
+/// Steam for its free license — the message Valve's own client sends when a
+/// player takes a free game. Steam grants it, the refresh that follows brings
+/// the game into the owned library, and it installs and starts like any other.
+private struct SteamFreeGamesSheet: View {
+    @ObservedObject private var steam = SteamOwnedLibrary.shared
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    if !steam.signedIn {
+                        Text("Sign in to Steam first; free games then join your account through Steam's own free-license flow.").foregroundStyle(.secondary)
+                    } else if steam.claimingFree {
+                        HStack(spacing: 12) { ProgressView(); Text("Asking Steam…") }
+                    }
+                }
+                Section {
+                    ForEach(Self.catalog.filter { steam.game($0.appID) == nil && !steam.claimedFree.contains($0.appID) }) { offer in
+                        Button { Task { await steam.claimFree(appID: offer.appID) } } label: {
+                            HStack(spacing: 12) {
+                                SteamGameArtwork(appID: offer.appID)
+                                    .frame(width: 46, height: 69)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(offer.name)
+                                    Text(offer.genre).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "plus.circle.fill").foregroundStyle(.accentColor)
+                            }
+                        }
+                        .disabled(!steam.signedIn || steam.claimingFree)
+                    }
+                } header: { Text("Free to play") } footer: {
+                    Text("Steam grants the license itself, exactly as its own client does for free-to-play games; the game then installs through the normal owned-library path. Games the account already owns are not listed here.")
+                }
+            }
+            .navigationTitle("Free games")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+
+    struct Offer: Identifiable {
+        let appID: Int
+        let name: String
+        let genre: String
+        var id: Int { appID }
+    }
+
+    /// Well-known free-to-play titles with Windows depots, to browse until a
+    /// proper discovery query exists. Steam's own response decides every grant:
+    /// an app it does not offer for free is refused with its code.
+    static let catalog: [Offer] = [
+        .init(appID: 570, name: "Dota 2", genre: "MOBA"),
+        .init(appID: 730, name: "Counter-Strike 2", genre: "Shooter"),
+        .init(appID: 440, name: "Team Fortress 2", genre: "Shooter"),
+        .init(appID: 1222670, name: "The Sims 4", genre: "Life simulation"),
+        .init(appID: 1085660, name: "Destiny 2", genre: "Shooter"),
+        .init(appID: 230410, name: "Warframe", genre: "Action"),
+        .init(appID: 238960, name: "Path of Exile", genre: "Action RPG"),
+        .init(appID: 291550, name: "Brawlhalla", genre: "Fighting"),
+        .init(appID: 953820, name: "Fall Guys", genre: "Platformer"),
+        .init(appID: 236390, name: "War Thunder", genre: "Vehicles"),
+        .init(appID: 444090, name: "Paladins", genre: "Hero shooter"),
+        .init(appID: 1599340, name: "Lost Ark", genre: "Action RPG"),
+        .init(appID: 761890, name: "Albion Online", genre: "MMO"),
+        .init(appID: 2767030, name: "Marvel Rivals", genre: "Hero shooter"),
+        .init(appID: 2071610, name: "The First Descendant", genre: "Shooter"),
+        .init(appID: 1665460, name: "eFootball", genre: "Sports"),
+    ]
 }

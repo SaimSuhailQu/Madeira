@@ -43,6 +43,8 @@ enum EMsg: UInt32 {
     case serviceMethod = 146
     case serviceMethodResponse = 147
     case serviceMethodCallFromClient = 151
+    case clientRequestFreeLicense = 5012
+    case clientRequestFreeLicenseResponse = 5013
 
     /// The raw value with the protobuf flag set.
     var masked: UInt32 { rawValue | EMsg.protoMask }

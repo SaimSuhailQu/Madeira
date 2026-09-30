@@ -107,6 +107,15 @@ device and a link to the game's Steam Store page. When the download finishes,
 the game becomes a library entry and the sheet's button reads **Open**, which
 opens its Game details page.
 
+**Free games** (Browse free games… under Not installed) lists well-known
+free-to-play titles. Choosing one asks Steam for the app's free license over
+the app's own connection — `ClientRequestFreeLicense`, the message Valve's
+own client sends when a player takes a free game. Steam itself decides the
+grant: a game it does not offer for free is refused with its result code, and
+nothing here bypasses a price or a licence. A granted license appears with the
+library refresh that follows; the game then installs, updates and starts
+through the normal owned-library path, licence checks included.
+
 Sign-in is not new: Settings › Steam and first-run setup (`docs/STEAM_SIGNIN.md`,
 `docs/LIBRARY.md`) sign in and out. Signing in fetches the library; signing out
 deletes the cached list and stops the downloads.

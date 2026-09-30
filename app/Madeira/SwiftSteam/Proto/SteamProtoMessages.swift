@@ -588,6 +588,40 @@ struct CMsgClientLogonResponse {
     }
 }
 
+// MARK: - Free License
+
+/// ClientRequestFreeLicense (EMsg 5012): the message Valve's own client sends
+/// when a player takes a free-to-play game. appID is field 1.
+struct CMsgClientRequestFreeLicense {
+    var appID: UInt32 = 0
+
+    func serialize() -> Data {
+        var encoder = ProtobufEncoder()
+        encoder.writeUInt32(fieldNumber: 1, value: appID)
+        return encoder.data
+    }
+}
+
+/// ClientRequestFreeLicenseResponse (EMsg 5013): eresult is field 1, the
+/// granted app IDs are repeated uint32 field 2.
+struct CMsgClientRequestFreeLicenseResponse {
+    var eresult: Int32 = 0
+    var grantedAppIDs: [UInt32] = []
+
+    static func deserialize(from data: Data) throws -> Self {
+        var decoder = ProtobufDecoder(data)
+        var msg = Self()
+        while let tag = try decoder.readTag() {
+            switch tag.fieldNumber {
+            case 1: msg.eresult = Int32(truncatingIfNeeded: try decoder.readVarint())
+            case 2: msg.grantedAppIDs.append(UInt32(truncatingIfNeeded: try decoder.readVarint()))
+            default: try decoder.skip(wireType: tag.wireType)
+            }
+        }
+        return msg
+    }
+}
+
 // MARK: - License / Ownership Messages
 
 struct CMsgClientLicenseList {
