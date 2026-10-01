@@ -1159,8 +1159,9 @@ private struct SteamFreeGamesSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        // Filtered outside ForEach: a complex data expression there makes the type
-        // checker pick ForEach's Binding overload and the build fail.
+        // The filter runs outside ForEach and its row is a small view: a complex
+        // data expression or row body there drives the type checker into ForEach's
+        // deprecated Binding overload and the build fails.
         let offers = Self.catalog.filter { steam.game($0.appID) == nil && !steam.claimedFree.contains($0.appID) }
         NavigationStack {
             List {
@@ -1172,28 +1173,36 @@ private struct SteamFreeGamesSheet: View {
                     }
                 }
                 Section {
-                    ForEach(offers) { offer in
-                        Button { Task { await steam.claimFree(appID: offer.appID) } } label: {
-                            HStack(spacing: 12) {
-                                SteamGameArtwork(appID: offer.appID)
-                                    .frame(width: 46, height: 69)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(offer.name)
-                                    Text(offer.genre).font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: "plus.circle.fill").foregroundStyle(.accentColor)
-                            }
-                        }
-                        .disabled(!steam.signedIn || steam.claimingFree)
-                    }
+                    ForEach(offers) { FreeGameRow(offer: $0) }
                 } header: { Text("Free to play") } footer: {
                     Text("Steam grants the license itself, exactly as its own client does for free-to-play games; the game then installs through the normal owned-library path. Games the account already owns are not listed here.")
                 }
             }
             .navigationTitle("Free games")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+
+    /// One free-to-play offer: choosing it asks Steam for the game's free license.
+    private struct FreeGameRow: View {
+        let offer: Offer
+        @ObservedObject private var steam = SteamOwnedLibrary.shared
+
+        var body: some View {
+            Button { Task { await steam.claimFree(appID: offer.appID) } } label: {
+                HStack(spacing: 12) {
+                    SteamGameArtwork(appID: offer.appID)
+                        .frame(width: 46, height: 69)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(offer.name)
+                        Text(offer.genre).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "plus.circle.fill").foregroundStyle(.accentColor)
+                }
+            }
+            .disabled(!steam.signedIn || steam.claimingFree)
         }
     }
 

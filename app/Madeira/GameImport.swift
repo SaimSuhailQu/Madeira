@@ -195,7 +195,7 @@ enum GameZip {
                     while done < Int(entry.size) {
                         let n = min(1 << 20, Int(entry.size) - done)
                         let piece = Data(r[body + done..<body + done + n])
-                        crcState = piece.withUnsafeBytes { zlib.crc32(crcState, $0.bindMemory(to: UInt8.self).baseAddress!, UInt32(n)) }
+                        crcState = UInt32(piece.withUnsafeBytes { zlib.crc32(uLong(crcState), $0.bindMemory(to: UInt8.self).baseAddress!, UInt32(n)) })
                         try out.write(contentsOf: piece)
                         done += n
                     }
@@ -213,7 +213,7 @@ enum GameZip {
                     inflateLoop: while true {
                         let avail = Int(entry.compressedSize) - consumed
                         if avail == 0 && produced == entry.size { break }
-                        stream.next_in = UnsafeMutablePointer(mutating: base.advanced(by: body + consumed))
+                        stream.next_in = UnsafeMutablePointer(mutating: base.advanced(by: body + consumed).assumingMemoryBound(to: UInt8.self))
                         stream.avail_in = u32_clamp(min(avail, 1 << 20))
                         stream.next_out = chunk
                         stream.avail_out = u32_clamp(1 << 18)
@@ -221,7 +221,7 @@ enum GameZip {
                         let got = (1 << 18) - Int(stream.avail_out)
                         if got > 0 {
                             let piece = Data(bytes: chunk, count: got)
-                            crcState = zlib.crc32(crcState, chunk, UInt32(got))
+                            crcState = UInt32(zlib.crc32(uLong(crcState), chunk, UInt32(got)))
                             do { try out.write(contentsOf: piece) } catch { inflateEnd(&stream); return }
                             produced += UInt64(got)
                         }

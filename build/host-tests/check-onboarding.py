@@ -99,7 +99,7 @@ require('dock.prepareClient()' in block(view, 'private var dockClientPage'), "co
 # ------------------------------------------------------------------ static: sign-in and tokens
 require('SteamSignInView()' in view and 'SteamSignInView()' in settings_section, "sign-in through #45's sheet")
 require('signIn.signOut()' in settings_section, "sign-out through #45's model")
-require('MadeiraDockView(start: { startDock($0, $1) })' in settings_section, "Settings opens Dock's sheet")
+require('MadeiraDockView(start: { startDock($0, $1, nil) })' in settings_section, "Settings opens Dock's sheet")
 for forbidden in ['SteamTokenStore', 'credentialsForDock', 'refreshToken', 'SecItem', 'kSec', 'accessToken']:
     require(forbidden not in onboarding, f'Onboarding.swift: no {forbidden} (tokens only via the sign-in store)')
 for line in onboarding.splitlines():

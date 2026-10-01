@@ -1938,7 +1938,7 @@ struct LibraryView: View {
             switch sheet {
             case .allSettings: AllSettingsView()
             case .steamSignIn: SteamSignInView()
-            case .dock: MadeiraDockView(start: { startDock($0, $1) })
+            case .dock: MadeiraDockView(start: { startDock($0, $1, nil) })
             }
         }
     }
