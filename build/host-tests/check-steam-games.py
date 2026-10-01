@@ -162,7 +162,9 @@ identity = bridge[bridge.index('const char *direct_app = getenv("MADEIRA_STEAM_A
 identity = identity[:identity.index('unsetenv("MADEIRA_STEAM_APPPATH");')]
 require('setenv("SteamAppId",  direct_app, 1);' in identity and 'strspn(direct_app, "0123456789") == strlen(direct_app)' in identity
         and '} else {' in identity and 'unsetenv("MADEIRA_STEAM_APPID");' in identity,
-        "bridge: a direct start publishes its game's own identity once (digits only, a C: folder); every other launch keeps the previous identity")
+        "bridge: a direct start publishes its game's own identity once (digits only, a C: folder); other launches publish the fixed identity only for its own title or the desktop")
+require('getenv("MADEIRA_EXE")' in identity and 'unsetenv("SteamAppId");' in identity,
+        "bridge: every other launch publishes no Steam identity, so FEX stops looking for configs under the wrong App ID")
 workdir = bridge[bridge.index('const char *launch_workdir = getenv("MADEIRA_WORKDIR");'):]
 workdir = workdir[:workdir.index('} else if (strchr(madeira_exe')]
 require('unsetenv("MADEIRA_WORKDIR");' in workdir and '!strstr(launch_workdir, "..")' in workdir and 'chdir(unix_dir)' in workdir,

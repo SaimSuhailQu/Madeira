@@ -895,19 +895,23 @@ static void *wine_process_thread(void *arg) {
          * queries it dozens of times during init, so it must be present before that
          * title starts.
          *
-         * KNOWN DEFECT, deliberately left in place for now: this publishes ONE title's
-         * identity to EVERY guest, with overwrite=1. A different title that links a Steam
-         * wrapper therefore sees the wrong app ID. Removing it outright was tested and is
-         * NOT the fix -- it regresses the title that needs the path, and it did not change
-         * the behaviour of the title that was mis-identified, so the mismatch is real but
-         * was not the failure being chased.
+         * FIXED (was a known defect): this used to publish ONE title's
+         * identity to EVERY guest, with overwrite=1, so any other title
+         * that links a Steam wrapper saw the wrong app ID and FEX looked
+         * for its AppConfig under that wrong Steam App ID. Removing the
+         * identity outright regressed the title that needs the path, so
+         * the fallback below now publishes the fixed identity only when
+         * the launched program is that title (its exe path) or explorer.exe
+         * — the desktop launch, where the eventual title is unknowable
+         * here — and clears all three for every other launch.
          *
          * The durable design belongs in the title-launch layer: publish nothing by
          * default, take the ID from explicit title metadata or the game's own
          * steam_appid.txt, set SteamAppPath to that game's directory, and give each child
          * its own environment rather than mutating one process-global set shared by every
          * pseudo-process. This path usually launches explorer.exe and cannot know which
-         * title the desktop will start later, so a conditional here cannot work.
+         * title the desktop will start later, so the conditional below keeps the fixed
+         * identity for a desktop launch and narrows it everywhere else.
          *
          * A Madeira Dock session is the one launch that can know: it runs Valve's
          * client inside the host process, and the client gives every game it
@@ -939,9 +943,33 @@ static void *wine_process_thread(void *arg) {
             setenv("SteamAppId",  direct_app, 1);
             dprintf(STDERR_FILENO, "[steam-start] direct start: the game's own Steam identity (app %s) published\n", direct_app);
         } else {
-            setenv("SteamAppPath", "C:\\Program Files\\Thumper", 1);
-            setenv("SteamGameId", "356400", 1);
-            setenv("SteamAppId",  "356400", 1);
+            /* Not a Dock session and not a direct Steam start. The fixed
+             * identity belongs to ONE title, so publish it only for that
+             * title's own launch (its exe path) or a desktop launch
+             * (explorer.exe, which cannot know which title the desktop
+             * will start next). Every other launch — e.g. a zip-imported
+             * game — publishes no Steam identity, so FEX stops looking
+             * for that game's AppConfig under the wrong App ID. */
+            const char *probe_exe = getenv("MADEIRA_EXE");
+            char probe_lower[1024];
+            size_t probe_len = 0;
+            if (probe_exe) {
+                for (; probe_exe[probe_len] && probe_len < sizeof(probe_lower) - 1; probe_len++) {
+                    char c = probe_exe[probe_len];
+                    probe_lower[probe_len] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+                }
+            }
+            probe_lower[probe_len] = '\0';
+            if (strstr(probe_lower, "thumper") || strstr(probe_lower, "explorer")) {
+                setenv("SteamAppPath", "C:\\Program Files\\Thumper", 1);
+                setenv("SteamGameId", "356400", 1);
+                setenv("SteamAppId",  "356400", 1);
+            } else {
+                unsetenv("SteamAppPath");
+                unsetenv("SteamGameId");
+                unsetenv("SteamAppId");
+                dprintf(STDERR_FILENO, "[steam-env] launch is not that title: no Steam identity published\n");
+            }
         }
         unsetenv("MADEIRA_STEAM_APPID");
         unsetenv("MADEIRA_STEAM_APPPATH");
