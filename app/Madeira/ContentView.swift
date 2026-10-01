@@ -2986,7 +2986,10 @@ struct ContentView: View {
             if inLibrary { library.error = error.localizedDescription }
         }
         do {
-            try MadeiraDock.validate(game, drive: MadeiraDock.drive)
+            // The Valve client download cannot come before this: the record checks must
+            // not fail a first start whose files do not exist yet, so a start that will
+            // fetch them (the Task below) only validates the game record here.
+            try MadeiraDock.validate(game, drive: MadeiraDock.drive, requireClient: !MadeiraDock.clientInstalled)
             try profile?.validate()
             guard SteamSignIn.isSignedIn else { throw DockError.message("Sign in to Steam in Madeira before starting Dock.") }
         } catch { fail(error); return }
@@ -3006,6 +3009,9 @@ struct ContentView: View {
                 // instead of sending the player to Settings. No session runs yet; the
                 // installer refuses while one does (SteamRuntimeFiles.Failure.activeSession).
                 try await MadeiraDockModel.shared.installClientIfNeeded()
+                // The client files exist from here on, so the start validates the
+                // records with them present, as every later start does.
+                try MadeiraDock.validate(game, drive: MadeiraDock.drive)
             } catch { fail(error); return }
             await SteamOwnedLibrary.shared.prepareDock()
             do {

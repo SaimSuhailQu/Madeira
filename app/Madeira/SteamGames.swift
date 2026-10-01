@@ -1159,6 +1159,9 @@ private struct SteamFreeGamesSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        // Filtered outside ForEach: a complex data expression there makes the type
+        // checker pick ForEach's Binding overload and the build fail.
+        let offers = Self.catalog.filter { steam.game($0.appID) == nil && !steam.claimedFree.contains($0.appID) }
         NavigationStack {
             List {
                 Section {
@@ -1169,7 +1172,7 @@ private struct SteamFreeGamesSheet: View {
                     }
                 }
                 Section {
-                    ForEach(Self.catalog.filter { steam.game($0.appID) == nil && !steam.claimedFree.contains($0.appID) }) { offer in
+                    ForEach(offers) { offer in
                         Button { Task { await steam.claimFree(appID: offer.appID) } } label: {
                             HStack(spacing: 12) {
                                 SteamGameArtwork(appID: offer.appID)

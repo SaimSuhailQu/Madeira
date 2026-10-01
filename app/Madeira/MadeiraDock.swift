@@ -130,13 +130,18 @@ enum MadeiraDock {
     }
 
     /// Everything a launch needs, checked before any sign-in is handed over.
-    static func validate(_ game: DockGame, drive: URL, bundled: Bool = MadeiraDock.bundled) throws {
+    /// `requireClient` false lets a first start pass the game-record checks now and have
+    /// them repeated with the client present, after the Task below fetches Valve's files.
+    static func validate(_ game: DockGame, drive: URL, bundled: Bool = MadeiraDock.bundled,
+                         requireClient: Bool = true) throws {
         guard bundled else { throw DockError.message("Madeira Dock is not built into this app. Run build/madeira-dock/build.sh.") }
         guard validAppID(game.id), validFolderName(game.installDir) else {
             throw DockError.message("This game's Steam install record is invalid.")
         }
-        guard FileManager.default.fileExists(atPath: drive.appendingPathComponent(SteamRuntimeFiles.relativeRoot + "/steamclient64.dll").path) else {
-            throw DockError.message("Steam's client files are missing. Download Valve's client components first.")
+        if requireClient {
+            guard FileManager.default.fileExists(atPath: drive.appendingPathComponent(SteamRuntimeFiles.relativeRoot + "/steamclient64.dll").path) else {
+                throw DockError.message("Steam's client files are missing. Download Valve's client components first.")
+            }
         }
         var isFolder: ObjCBool = false
         guard game.installed,
