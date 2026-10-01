@@ -551,7 +551,7 @@ enum StikJITHelper {
             VM_INHERIT_NONE
         )
 
-        guard kr1 == KERN_SUCCESS else {
+        if kr1 != KERN_SUCCESS {
             LogStore.shared.log("vm_remap failed: \(kr1)", level: .error)
             // mi16: without extended-virtual-addressing the task's VA ends at 64G,
             // so the 448G hint is KERN_NO_SPACE by construction and the launch died
