@@ -1199,7 +1199,7 @@ private struct SteamFreeGamesSheet: View {
                         Text(offer.genre).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Image(systemName: "plus.circle.fill").foregroundStyle(.accentColor)
+                    Image(systemName: "plus.circle.fill").foregroundStyle(Color.accentColor)
                 }
             }
             .disabled(!steam.signedIn || steam.claimingFree)
