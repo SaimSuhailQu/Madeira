@@ -245,6 +245,11 @@ enum StikJITHelper {
         }
 
         let goodLow = 0x119000000
+        // mi16: FEX maps its guest address space at 12G (0x300000000, up to 64G);
+        // a pool placed there is refused by the runtime and, worse, the census
+        // counted that run as a "hole" a 512MB pool could take. Cap the low
+        // search at 12G so only genuinely usable space is measured.
+        let guestFloor = 0x300000000
         let guestLo = 0x7000000000
         let guestHi = 0x8000000000
 
@@ -285,7 +290,7 @@ enum StikJITHelper {
             var holes: [(base: vm_address_t, size: vm_address_t)] = []
             var addr = vm_address_t(goodLow)
             var prevEnd = vm_address_t(goodLow)
-            while addr < vm_address_t(guestLo) {
+            while addr < vm_address_t(guestFloor) {
                 var rsize: vm_size_t = 0
                 var info = vm_region_basic_info_data_64_t()
                 var cnt = mach_msg_type_number_t(MemoryLayout<vm_region_basic_info_data_64_t>.size / MemoryLayout<Int32>.size)
@@ -302,7 +307,7 @@ enum StikJITHelper {
                 addr = prevEnd
             }
             let desc = holes.map { String(format: "0x%lx+%luMB", Int($0.base), Int($0.size >> 20)) }.joined(separator: " ")
-            LogStore.shared.log("ml1036: free holes >=64MB in [0x119000000,0x7000000000) with the window held: "
+            LogStore.shared.log("ml1036: free holes >=64MB in [0x119000000,0x300000000) with the window held: "
                 + (desc.isEmpty ? "NONE" : desc))
             let largest = holes.map { $0.size }.max() ?? 0
             if largest < vm_address_t(poolSize) {
@@ -355,7 +360,7 @@ enum StikJITHelper {
             // ml1034: a pool covering 0x140000000 displaces a non-relocatable
             // main image, which is fatal later and unrecoverable.
             let hitsExeWindow = overlapsExeWindow(vm_address_t(a), vm_address_t(poolSize))
-            if a >= goodLow && !inGuestWindow && !hitsExeWindow {
+            if a >= goodLow && a + poolSize <= guestFloor && !inGuestWindow && !hitsExeWindow {
                 rxPtrOpt = p
                 break
             }
@@ -363,7 +368,7 @@ enum StikJITHelper {
                                        a,
                                        a < goodLow ? "mode A low"
                                          : (hitsExeWindow ? "swallows the 0x140000000 executable window"
-                                                          : "guest 64G window"),
+                                            : (a + poolSize > guestFloor ? "FEX guest space (12G-64G)" : "guest 64G window")),
                                        attempt), level: .error)
             let dkr = vm_deallocate(mach_task_self_, vm_address_t(a), vm_size_t(poolSize))
             LogStore.shared.log(dkr == KERN_SUCCESS
@@ -372,6 +377,31 @@ enum StikJITHelper {
         }
         // ml1040: the plugs existed only to steer first-fit; give the VA back.
         for (a, sz) in plugs { vm_deallocate(mach_task_self_, a, sz) }
+        // mi16: with the guest space refused, a phone whose space above the window
+        // cannot hold the pool has nowhere left to go — every re-roll lands in FEX's
+        // 12G-64G and is rejected. The plugs are what pushed it there: the hole below
+        // the executable window was held back only to keep first-fit above it. Take
+        // that last-chance placement; a pool below the window but clear of
+        // 0x140000000 is the measured-good configuration (rdr40/41: RX=0x119eb0000).
+        if rxPtrOpt == nil, !plugs.isEmpty {
+            LogStore.shared.log("mi16: nothing above the window while the lower holes are held — retrying below the window", level: .error)
+            for attempt in 0..<2 {
+                guard let p = jit26_prepare_region(nil, poolSize), p != UnsafeMutableRawPointer(bitPattern: 0) else {
+                    LogStore.shared.log("Debugger failed to allocate RX memory (last chance \(attempt))", level: .error)
+                    break
+                }
+                let a = Int(bitPattern: p)
+                let inGuestWindow = a + poolSize > guestLo && a < guestHi
+                let hitsExeWindow = overlapsExeWindow(vm_address_t(a), vm_address_t(poolSize))
+                if a >= goodLow, a + poolSize <= guestFloor, !inGuestWindow, !hitsExeWindow {
+                    rxPtrOpt = p
+                    LogStore.shared.log(String(format: "mi16: last-chance pool accepted below the window at 0x%lx", a), level: .success)
+                    break
+                }
+                LogStore.shared.log(String(format: "BAD POOL placement 0x%lx — last-chance re-roll (attempt %d)", a, attempt), level: .error)
+                vm_deallocate(mach_task_self_, vm_address_t(a), vm_size_t(poolSize))
+            }
+        }
         guard let rxPtr = rxPtrOpt else {
             LogStore.shared.log("BAD POOL: no valid placement after retries. Killing in 10s — please relaunch.", level: .error)
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 10) {
@@ -523,7 +553,21 @@ enum StikJITHelper {
 
         guard kr1 == KERN_SUCCESS else {
             LogStore.shared.log("vm_remap failed: \(kr1)", level: .error)
-            return nil
+            // mi16: without extended-virtual-addressing the task's VA ends at 64G,
+            // so the 448G hint is KERN_NO_SPACE by construction and the launch died
+            // here ("JIT pool allocation FAILED — not starting Wine"). The alias has
+            // no placement requirement of its own (FEX derives WriteOffset from the
+            // real distance), so retry at the kernel's choice instead of failing.
+            rwAddr = 0
+            let krRetry = vm_remap(
+                mach_task_self_, &rwAddr, vm_size_t(poolSize), 0, VM_FLAGS_ANYWHERE,
+                mach_task_self_, vm_address_t(bitPattern: rxPtr), 0,
+                &curProt, &maxProt, VM_INHERIT_NONE)
+            guard krRetry == KERN_SUCCESS else {
+                LogStore.shared.log("vm_remap retry (anywhere) failed: \(krRetry)", level: .error)
+                return nil
+            }
+            LogStore.shared.log(String(format: "mi16: RW alias placed by the kernel at 0x%lx (no extended VA)", Int(rwAddr)), level: .success)
         }
 
         let rwOverlaps = overlapsExeWindow(rwAddr, vm_address_t(poolSize))
