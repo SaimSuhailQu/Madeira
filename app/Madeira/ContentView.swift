@@ -1521,11 +1521,17 @@ struct ContentView: View {
     private func logEntitlementStatus() {
         guard let ents = entitlements else { return }
         logStore.log("Checking entitlements...")
-        logStore.log("  allow-jit: \(ents.jitAllowed)", level: ents.jitAllowed ? .success : .error)
+        // allow-jit is a macOS-only entitlement — iOS never grants it, so it
+        // reads false even on a correctly signed build. On iOS the real JIT
+        // signal is the attached debugger (CS_DEBUGGED, set by StikDebug/
+        // StikJIT), which is what the JIT badge above uses. Log both plainly
+        // so "allow-jit: false" is never mistaken for "JIT is broken".
+        logStore.log("  allow-jit: \(ents.jitAllowed) (macOS-only; iOS JIT rides on the attached debugger)", level: .debug)
+        logStore.log("  debugger-attached (iOS JIT signal): \(debuggerAttached)", level: debuggerAttached ? .success : .error)
         logStore.log("  increased-memory-limit: \(ents.increasedMemory)", level: ents.increasedMemory ? .success : .debug)
         logStore.log("  extended-virtual-addressing: \(ents.extendedVA)", level: ents.extendedVA ? .success : .debug)
         if !ents.extendedVA {
-            logStore.log("  Tip: Use GetMoreRam to inject extended-virtual-addressing", level: .info)
+            logStore.log("  Tip: Use GetMoreRam to inject extended-virtual-addressing (a free account's provisioning profile can't grant it)", level: .info)
         }
     }
 
