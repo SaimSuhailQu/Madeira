@@ -157,7 +157,7 @@ jobs:
 
       - name: Fix script permissions
         run: |
-          find scripts build -type f -name '*.sh' -exec chmod +x {} +
+          find tools build -type f -name '*.sh' -exec chmod +x {} +
 
       - name: Resolve the 32-bit (i386) build flag
         id: i386
