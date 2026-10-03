@@ -1879,6 +1879,11 @@ struct LibraryView: View {
     var startDock: (DockGame, Bool) -> Void = { _, _ in }
     /// First-run setup (Onboarding.swift).
     @ObservedObject private var onboarding = OnboardingModel.shared
+    @ObservedObject private var jit = JITCoordinator.shared
+    /// The library's error is a JIT connection problem with a fix to offer.
+    private var jitProblem: JITCoordinator.ConnectionProblem? {
+        jit.connectionProblem.flatMap { model.error == $0.message ? $0 : nil }
+    }
     @State private var browser = false
     @State private var selected: LibraryEntry?
     @State private var search = ""
@@ -1939,6 +1944,14 @@ struct LibraryView: View {
             LibraryLargeTitle()
             if tab == 0 { libraryToolbar } else { settingsToolbar }
         }
+        // On the tab view, not inside one tab's page: an alert attached to the Library
+        // page cannot present while Settings is showing, so an error raised there (its
+        // Enable JIT, for one) waited until the Library tab came back.
+        .alert(jitProblem == nil ? "Library" : "Couldn't Enable JIT",
+               isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
+            if let jitProblem { jitConnectionActions(jitProblem) { model.error = nil } }
+            Button("OK", role: .cancel) { model.error = nil }
+        } message: { Text(model.error ?? "") }
         .fullScreenCover(isPresented: $onboarding.presented) { OnboardingView() }
         .onAppear {
             // An ended desktop session's surface never stays over the library.
@@ -1999,6 +2012,9 @@ struct LibraryView: View {
             if settingsShow("ready to play", "JIT", "Memory+", "StikDebug", "status") {
                 Section { LibraryStatus().listRowBackground(Color.clear) }
             }
+            if settingsShow("JIT", "StikDebug", "built-in", "pairing", "LocalDevVPN") {
+                JITSettingsSection()
+            }
             if settingsShow("diagnostics", "extended logging", "logging", "log") {
                 Section {
                     Toggle("Extended logging", isOn: $input.diagnostics)
@@ -2044,7 +2060,7 @@ struct LibraryView: View {
                     MadeiraCredit(name: "Jfishin", handle: "Jfishin", role: "The original native Steam sign-in, library and downloads")
                     MadeiraCredit(name: "Jesse", handle: "JesseLovelace", role: "Steam Cloud saves, faster game launches, and fixes that let more games run")
                 } header: { Text("Credits") } footer: {
-                    Text("Madeira is built on Wine, FEX-Emu, DXMT by Feifan He (3Shain) with the Direct3D 9 frontend by David Acevedo (dacevedo12), rpmalloc by Mattias Jansson, and StikDebug for enabling JIT. Thank you to everyone who contributes to these projects.")
+                    Text("Madeira is built on Wine, FEX-Emu, DXMT by Feifan He (3Shain) with the Direct3D 9 frontend by David Acevedo (dacevedo12), rpmalloc by Mattias Jansson, StikDebug and StikJIT. Thank you to everyone who contributes to these projects.")
                 }
             }
         }
@@ -2174,9 +2190,6 @@ struct LibraryView: View {
             model.showDetail = nil
             selected = model.entries.first { $0.id == id }
         }
-        .alert("Library", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
-            Button("OK", role: .cancel) { model.error = nil }
-        } message: { Text(model.error ?? "") }
         .onChange(of: scenePhase) { _, phase in if phase == .active { model.refreshFlag() } }
         .onAppear {
             if focused == nil { focused = LibraryEntry.desktopID }
