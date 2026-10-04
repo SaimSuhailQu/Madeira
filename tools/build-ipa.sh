@@ -13,6 +13,7 @@ command -v xcodebuild >/dev/null || die "Xcode is required. Install it from the 
 command -v xcrun >/dev/null || die "Xcode command-line tools are required."
 command -v brew >/dev/null || die "Homebrew is required: https://brew.sh"
 command -v python3 >/dev/null || die "python3 is required (ships with Xcode command-line tools)."
+command -v cargo >/dev/null || die "Rust (cargo) is required: install from https://rustup.rs, then run: rustup target add aarch64-apple-ios"
 
 log "Installing build dependencies"
 brew install cmake ninja meson pkg-config autoconf automake libtool bison flex sevenzip llvm || true
@@ -53,6 +54,9 @@ log "Building Wine unix libraries"
 "$ROOT/tools/build/build-llvm-ios.sh"
 "$ROOT/tools/build/build-shader-headers.sh"
 "$ROOT/tools/build/build-dxmt-ios.sh"
+
+log "Building on-device pairing library (Rust)"
+"$ROOT/build/rppairing-ios/build.sh"
 
 log "Building Madeira Dock host"
 "$ROOT/build/madeira-dock/build.sh"

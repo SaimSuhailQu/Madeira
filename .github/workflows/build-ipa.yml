@@ -159,6 +159,11 @@ jobs:
         run: |
           find tools build -type f -name '*.sh' -exec chmod +x {} +
 
+      - name: Set up Rust (on-device pairing library)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
       - name: Resolve the 32-bit (i386) build flag
         id: i386
         run: |
