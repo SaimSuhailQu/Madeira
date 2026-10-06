@@ -56,7 +56,10 @@ OVERLAY = {
     "env.MADEIRA_FASTSYNC": {"category": "Synchronisation", "title": "Fastsync (in-process sync, default)", "kind": "choice",
                 "note": "Fastsync is the default engine: with neither this nor inproc-sync set, the app exports auto. Settings > Sync engine > Fastsync removes both keys. Never runs while madsync is on. auto arms the fast wake path on heavy event traffic, 1 from the start, cells only answers polls, 0 is off.",
                 "choices": [("", "Default (auto)"), ("auto", "Auto"), ("1", "On"), ("cells", "Poll answers only"), ("0", "Off")]},
-    "vram-mb": {"title": "Video memory budget (MB)"},
+    # Read by winemetal (the DXGI budget) and, for the opt-in D3DKMT adapter, by
+    # build/win32u-unix/d3dkmt_ios.c; keep the DXMT category and note.
+    "vram-mb": {"title": "Video memory budget (MB)", "category": "Direct3D 9/10/11 (DXMT)",
+                "note": "ml1095: madeira.cfg vram-mb = N"},
     "pool": { "category": "Memory & JIT pool","title": "JIT pool size (MB)"},
     "totalphys": { "category": "Memory & JIT pool","title": "Reported physical memory (MB)"},
     "eco": { "note": 'Runs guest threads at a lower iOS QoS class so the system favours efficiency and saves power; can cost speed. Class chosen by eco-qos.',"title": "Eco scheduling"},
@@ -64,14 +67,24 @@ OVERLAY = {
                 "choices": [("", "Utility (default)"), ("background", "Background"), ("initiated", "User initiated")]},
     "env.MADEIRA_WG_VIDEO": {"title": "Media: MP4 video (32-bit programs)",
                 "note": "0 limits the media parser to MP3/WAV; by default MP4 with H.264/HEVC video decodes through VideoToolbox."},
+    "env.MADEIRA_WOW_RWX_PLAIN": {"category": "Memory & JIT pool", "note": "Unset: a 32-bit window's anonymous RWX memory is plain read/write to the host once Wine Mono's libmono-2.0-x86.dll is mapped there (ml1279/ml1282). 1: in every 32-bit window. 0: never (stores go through the JIT pool's alias, and FEX's Mono bridge stays off)."},
+    "env.MADEIRA_WINEMONO_BRIDGE": {"note": "FEX's Mono backpatcher bridge (ml712). On by itself for Wine Mono, 32- and 64-bit (ml1282/ml1286); for the 32-bit runtime in a guest window it also turns SMC detection off once the backpatcher is found (ml1280). 0 keeps it off."},
+    "env.MADEIRA_MONO_DEFAULTS": {"category": "Wine libraries", "note": "Wine Mono, 32- and 64-bit: mscoree sets MONO_THREADS_SUSPEND=coop and adds keep-delegates to MONO_DEBUG before Mono loads, and puts the previous values back once Mono has read them (ml1282); values already set win. 0 sets nothing."},
     "cpu-count": {"title": "Reported CPU count (0 = device)"},
-    "desktop-size": {"title": "Virtual desktop size (WxH)"},
+    "desktop-size": {"title": "Virtual desktop size (WxH)",
+                     "note": "The developer interface's Wine desktop size (ml1127); its Resolution menu writes it (ml1157). Madeira Dock sessions without a game's Resolution use it too. Unset: this screen's shape at 1280x720's pixel count (ml1172: 1408x648 on a 19.5:9 iPhone, 1152x800 on an 11-inch iPad). Applies at the next app start."},
     "d3d9": {"title": "Direct3D 9 frontend (32-bit)", "kind": "choice",
              "choices": [("", "Default (emulated)"), ("native", "Native ARM64 frontend")]},
     "fence-chain": {"title": "D3D12 fence chain mode"},
     "async-submit": {"title": "D3D12 asynchronous submission"},
     "upload-swap": {"title": "D3D12 upload buffers on file-backed memory"},
     "d3d12-typed-uav-load": {"title": "D3D12 typed UAV loads (report support)"},
+    # Read by DXMT's DXGI and by win32u's display adapter (sysparams_ios.c); a
+    # library entry's "Report an NVIDIA GPU" sets it.
+    "env.DXMT_ENABLE_NVEXT": {"category": "Direct3D 9/10/11 (DXMT)", "title": "Report an NVIDIA GPU (all games)",
+                "note": "1: DXGI names NVIDIA as the vendor, DXMT's NVAPI answers and win32u registers the display "
+                        "adapter as a GeForce RTX 3060 (driver 581.57). Per game: Game details > Report an NVIDIA GPU, "
+                        "which also sets the matching DXGI device id."},
     "ags-rewrite": {"title": "D3D12 AMD AGS 64-bit atomics rewrite"},
     "env.MADEIRA_EXE": {"title": "Program to start at launch (Windows path or name)"},
     "env.MADEIRA_ONBOARDING": {"title": "First-run Steam setup"},
@@ -96,11 +109,31 @@ OVERLAY = {
                 "note": "1: with the HID controller on, player 1 also stays an XInput pad. Off by default, so a game "
                         "that reads both APIs does not see the same pad twice.",
                 "sources": ["app/Madeira/GamepadInput.swift"]},
+    # ml2106: game output to the physical pad (app/Madeira/PadOutput.m).
+    "env.MADEIRA_PAD_OUTPUT": {"category": "Controllers", "title": "Rumble, adaptive triggers and lightbar to the pad",
+                "kind": "choice",
+                "note": "On (default): XInput rumble plays on the controller (CoreHaptics), and in DualSense HID mode the "
+                        "game's output reports drive rumble, adaptive triggers (closest GameController mode), lightbar "
+                        "and player LEDs. hid: only the DualSense's; xinput: only XInput rumble; 0: none. Read at "
+                        "session start.",
+                "choices": [("", "On (default)"), ("hid", "DualSense output only"), ("xinput", "XInput rumble only"),
+                            ("0", "Off")],
+                "sources": ["app/Madeira/GamepadInput.swift", "app/Madeira/PadOutput.m"]},
     "env.MADEIRA_PROMOTE": {"title": "Hold the display at its maximum rate"},
+    # The D3D12/DXGI GPU as a D3DKMT adapter (build/win32u-unix/d3dkmt_ios.c).
+    "env.MADEIRA_KMT_ADAPTER": {"category": "Windows, display & input", "title": "D3DKMT adapter for the GPU (WDDM 3.1)",
+                "kind": "bool", "default": "0",
+                "note": "1: D3DKMTEnumAdapters2 lists the GPU DXGI and D3D12 report (same LUID) and "
+                        "D3DKMTQueryAdapterInfo answers like a WDDM 3.1 driver (driver version, caps, device ids, "
+                        "memory, performance data). Off (default): no adapter is listed, as before. Read at "
+                        "session start."},
     "dxmt": {"title": "DXMT options (a=b;c=d)",
              "note": "Exported as DXMT_CONFIG with the options joined by ';', a library game's own dxmt options after these: "
                      "e.g. d3d11.mipClampBC=1;d3d11.preferredMaxFrameRate=30. DXMT reads at most 259 characters of it, "
                      "and nothing at all from a longer value (ml1255)."},
+    "metalfx-upscale": {"title": "MetalFX upscaling factor", "kind": "choice",
+             "note": "Scales the presented picture with Apple's MetalFX spatial scaler (Direct3D 11 and 12). Usually set per game in Game details > Display.",
+             "choices": [("", "Off"), ("1.5", "1.5x"), ("2", "2x")]},
 }
 
 
