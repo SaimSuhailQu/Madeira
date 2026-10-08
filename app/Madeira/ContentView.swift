@@ -1340,6 +1340,7 @@ struct ContentView: View {
                 logEntitlementStatus()
                 logStore.log("[build] \(BuildStamp.text)")
                 DeviceDiagnostics.logStartup()
+                DockOffline.begin()
                 FrontendChoice.logStartup()
                 DeviceLoadDiagnostics.start()
                 // Madeira Dock: an unconsumed sign-in transfer from an earlier run goes.
@@ -3289,6 +3290,16 @@ struct ContentView: View {
         // is handed to Valve's client, and it stays off until the Dock session has ended
         // (SteamOwnedLibrary.prepareDock / dockEnded, SteamConnectionGate).
         Task { @MainActor in
+            // Resolve the original config.launch key before closing the native connection.
+            // A filtered launch array can start at 1 (or have gaps); its offset is not the key.
+            // Without a choice (no configuration to be had, or no entry whose .exe is on disk:
+            // a launcher started through a .bat, say) it is key 0, which every Dock start
+            // used before; Dock stops at once if Steam names that entry missing.
+            let options = await SteamOwnedLibrary.shared.launchOptions(appID: game.id)
+            let installFolder = MadeiraDock.drive.appendingPathComponent(game.library + "/common/" + game.installDir)
+            let chosen = options.flatMap { SteamDirectStart.choose($0, installFolder: installFolder)?.launchIndex }
+            let launchOption = chosen ?? 0
+            LogStore.shared.log("[madeira-dock] launch option \(launchOption)\(chosen == nil ? " (none chosen: the default)" : "")")
             await SteamOwnedLibrary.shared.prepareDock()
             do {
                 // The launch state may have changed while the connection closed.
@@ -3301,7 +3312,7 @@ struct ContentView: View {
                 }
                 try MadeiraDock.writeHandoff(account: signIn.accountName, token: signIn.refreshToken, appID: game.id)
             } catch { fail(error); return }
-            MadeiraDock.configure(game)
+            MadeiraDock.configure(game, launchOption: launchOption)
             // The game's one-time installs (its Steam install script) run first, in the same
             // session. No session runs yet, so the registry files can be read and written.
             DockInstallers.prepare(game, drive: MadeiraDock.drive, prefix: MadeiraDock.prefix)
@@ -3993,10 +4004,13 @@ struct TouchControlsOverlay: View {
     }
 
     private func configureGamepad(landscape: Bool) {
-        let ids = landscape && m.visible && !m.editing && !library.blocksGameplayTouch
+        let ids = landscape && m.visible
             ? m.controls.filter { $0.action.padName.map(TouchPadAction.supported) ?? false }.map(\.id) : []
-        GamepadInput.shared.configureTouch(controls: Set(ids))
-        TouchMouseGate.padOverlay = !ids.isEmpty
+        // Menus and the control editor keep the pad connected but take no input (#204);
+        // a touch that misses the controls is no mouse only while they do (#150).
+        let accepting = !m.editing && !library.blocksGameplayTouch
+        GamepadInput.shared.configureTouch(controls: Set(ids), acceptingInput: accepting)
+        TouchMouseGate.padOverlay = accepting && !ids.isEmpty
     }
 
     /// ml1970: with MADEIRA_CONTROLS_XBOX_DEFAULT=1, a user with no controls file gets the built-in controller

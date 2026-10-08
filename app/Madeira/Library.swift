@@ -2573,6 +2573,7 @@ struct LibraryView: View {
             if SteamSettingsSection.shown, settingsShow("Steam", "Dock", "sign in", "account", "setup") {
                 SteamSettingsSection(open: { settingsSheet = $0 })
             }
+            if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
             if settingsShow("appearance", "liquid metal", "metal", "glass") {
                 Section {
@@ -2595,7 +2596,7 @@ struct LibraryView: View {
                 SettingsSearchResults(query: settingsSearch.trimmingCharacters(in: .whitespaces), refresh: settingsRefresh)
             }
             // Credits, last on the Settings page.
-            if settingsShow("credits", "thanks", "Will Faust", "Nick", "125hz", "Jfishin", "Jesse", "JesseLovelace", "Dan Perks", "danperks", "bahacan16", "spitefulowl", "meshoklv") {
+            if settingsShow("credits", "thanks", "Will Faust", "Nick", "125hz", "Jfishin", "Jesse", "JesseLovelace", "Dan Perks", "danperks", "bahacan16", "spitefulowl", "meshoklv", "TheHadesc") {
                 Section {
                     MadeiraCredit(name: "Will Faust", handle: "willfaust", role: "Created Madeira")
                     MadeiraCredit(name: "Nick", handle: "125hz", role: "32-bit game support, the game library and Madeira Dock")
@@ -2605,6 +2606,7 @@ struct LibraryView: View {
                     MadeiraCredit(name: "bahacan16", handle: "bahacan16", role: "Direct3D 12 and DXMT fixes, game launcher windows, per-game settings, PlayStation controllers, and save backups")
                     MadeiraCredit(name: "spitefulowl", handle: "spitefulowl", role: "Wine and FEX runtime fixes, DXMT texture and memory fixes, audio, the swap tier, and library launch options")
                     MadeiraCredit(name: "meshoklv", handle: "meshoklv", role: "Controller fixes for games that ship their own XInput or need focus, touch taps that stay off the mouse, and a crash-guard fix")
+                    MadeiraCredit(name: "TheHadesc", handle: "TheHadesc", role: "Madeira Dock starts for games whose Steam launch entries do not start at zero, and a touch gamepad that survives the in-game keyboard")
                 } header: { Text("Credits") } footer: {
                     Text("Madeira is built on Wine, FEX-Emu, DXMT by Feifan He (3Shain) with the Direct3D 9 frontend by David Acevedo (dacevedo12), rpmalloc by Mattias Jansson, StikDebug, StikJIT and idevice. Thank you to everyone who contributes to these projects.")
                 }
@@ -2913,6 +2915,10 @@ struct LibraryDetail: View {
                                 Text(summary).font(.subheadline).foregroundStyle(.secondary)
                             } else if let played = entry.lastPlayed {
                                 Text("Last played \(played.formatted(.relative(presentation: .named)))").font(.subheadline).foregroundStyle(.secondary)
+                            }
+                            // A game Valve's client starts (Madeira Dock): can it start without a connection?
+                            if DockOffline.enabled, let appID = entry.steamAppID, !entry.startsSteamGameDirectly {
+                                DockOfflineMark(appID: appID)
                             }
                             Button(action: start) {
                                 HStack(spacing: 10) {
@@ -3378,6 +3384,57 @@ struct ControllerBindsPage: View {
         case 0x6E: return "Numpad ."
         case 0x6F: return "Numpad /"
         default:   return ControlAction.keyLabel(vk)
+        }
+    }
+}
+
+/// Game details: whether a Steam game that Valve's client starts (Madeira Dock)
+/// can start without a connection (DockOffline.Mark). Steam's offline sign-in
+/// belongs to the account: once Valve's client has reported that it can sign the
+/// account in offline, every installed game can start that way, and the client
+/// answers the license question from the list it cached. Only a game whose
+/// per-user program Steam prepares on its first start still needs that one start
+/// online. Tapping the line explains it; an offline start is always Steam's
+/// decision at that moment.
+struct DockOfflineMark: View {
+    let appID: Int
+    @State private var explain = false
+    /// The game's install record lists per-user executables (read once; it scans the library).
+    @State private var preparedOnline = false
+    var body: some View {
+        let mark = DockOffline.mark(appID, preparedOnline: preparedOnline)
+        let ready: Bool = { if case .ready = mark { return true } else { return false } }()
+        Button { explain = true } label: {
+            // Not a Label: inside a Form row a Label takes the list's wide icon column,
+            // which leaves the text far from its symbol.
+            HStack(spacing: 5) {
+                Image(systemName: ready ? "checkmark.circle.fill" : "wifi.exclamationmark")
+                Text(Self.line(mark))
+            }
+            .font(.caption.weight(.medium))
+            .foregroundStyle(ready ? Color.green : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .task { preparedOnline = MadeiraDock.games(drive: MadeiraDock.drive).first { $0.id == appID }?.customExecutables ?? false }
+        .alert(ready ? "Can be played offline" : "Not ready for offline play yet", isPresented: $explain) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(Self.explanation(mark)) }
+    }
+    static func line(_ mark: DockOffline.Mark) -> String {
+        switch mark {
+        case .ready: return "Can be played offline"
+        case .needsFirstStart: return "Start once online to play offline"
+        case .needsOnline: return "Start a game online to play offline"
+        }
+    }
+    static func explanation(_ mark: DockOffline.Mark) -> String {
+        switch mark {
+        case .ready(let saved):
+            return "Steam signed in online on this device on \(saved.formatted(date: .abbreviated, time: .omitted)) and can now sign this account in without a connection. With no internet, Madeira asks Steam to start the game offline; Steam checks its saved sign-in and its saved list of your licenses each time. Its offline sign-in expires after a while, so start a game online now and then. A game that needs its own servers still needs them."
+        case .needsFirstStart:
+            return "Steam can sign this account in offline, but it prepares this game's program for your account the first time it starts, and that needs a connection. Start this game once while you are online."
+        case .needsOnline:
+            return "Steam has not saved an offline sign-in on this device yet. Start any Steam game once while you are online; after that, installed games can start without a connection."
         }
     }
 }
@@ -4228,6 +4285,7 @@ enum LibraryKeyboard {
         fputs("[frontend-keyboard] key-window input activated\n", stderr)
     }
     static func hide() {
+        if window != nil { fputs("[frontend-keyboard] key-window input deactivated\n", stderr) }
         input?.releaseModifiers(); input?.resignFirstResponder(); window?.isHidden = true
         window = nil; input = nil; previous?.makeKey(); previous = nil
     }
