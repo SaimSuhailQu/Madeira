@@ -162,32 +162,45 @@ private struct EpicGameRow: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(game.title).font(.headline)
-                switch install?.phase {
-                case .preparing:
-                    Text("Preparing...").font(.caption).foregroundStyle(.secondary)
-                case .downloading:
-                    if let install {
-                        Text("Downloading \(Int(install.fraction * 100))%")
-                            .font(.caption).foregroundStyle(.secondary)
-                        ProgressView(value: install.fraction)
-                    }
-                case .failed(let reason):
-                    Text("Download failed: \(reason)").font(.caption).foregroundStyle(.red)
-                    Button("Try again") { onInstall() }.font(.caption)
-                case .none:
-                    if installed != nil {
-                        Button("Play") { onOpen() }
-                            .font(.caption).buttonStyle(.borderedProminent)
-                    } else {
-                        Button("Install") { onInstall() }
-                            .font(.caption).buttonStyle(.bordered)
-                    }
-                default:
-                    Text("Finishing...").font(.caption).foregroundStyle(.secondary)
-                }
+                statusLine
             }
             Spacer()
         }
-        .disabled(install != nil && install.phase != .failed)
+        .disabled(isBusy)
+    }
+
+    /// The row's state line and button: install progress, a failure with Try
+    /// again, or Install / Play while the game is not downloading.
+    @ViewBuilder
+    private var statusLine: some View {
+        if let install {
+            switch install.phase {
+            case .preparing:
+                Text("Preparing...").font(.caption).foregroundStyle(.secondary)
+            case .downloading:
+                Text("Downloading \(Int(install.fraction * 100))%")
+                    .font(.caption).foregroundStyle(.secondary)
+                ProgressView(value: install.fraction)
+            case .writing:
+                Text("Finishing...").font(.caption).foregroundStyle(.secondary)
+            case .failed(let reason):
+                Text("Download failed: \(reason)").font(.caption).foregroundStyle(.red)
+                Button("Try again") { onInstall() }.font(.caption)
+            }
+        } else if installed != nil {
+            Button("Play") { onOpen() }
+                .font(.caption).buttonStyle(.borderedProminent)
+        } else {
+            Button("Install") { onInstall() }
+                .font(.caption).buttonStyle(.bordered)
+        }
+    }
+
+    /// A row is disabled while its install runs; a failed one stays tappable so
+    /// Try again can restart it.
+    private var isBusy: Bool {
+        guard let install else { return false }
+        if case .failed = install.phase { return false }
+        return true
     }
 }
