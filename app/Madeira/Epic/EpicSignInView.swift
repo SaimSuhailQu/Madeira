@@ -11,6 +11,9 @@ import SwiftUI
 struct EpicSignInView: View {
     @ObservedObject private var auth = EpicAuth.shared
     @ObservedObject private var library = EpicLibrary.shared
+    @ObservedObject private var installs = EpicInstallModel.shared
+    /// Opens a game's Game details page after its install (LibraryView passes it).
+    var openEntry: ((LibraryEntry) -> Void)?
     @Environment(\.dismiss) private var dismiss
     @State private var showLogin = false
     @State private var showPaste = false
@@ -22,7 +25,7 @@ struct EpicSignInView: View {
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Sign in to Epic Games", systemImage: "person.crop.circle.fill").font(.title2.bold())
-                        Text("Madeira lists your Epic library so you can see your games. Installing them arrives in the next update.")
+                        Text("Madeira lists your Epic library, installs the Windows build of a game into the Wine prefix, and starts it like any library game.")
                             .foregroundStyle(.secondary)
                     }.padding(.vertical, 4)
                 }
@@ -98,7 +101,9 @@ struct EpicSignInView: View {
         Group {
             Section("Account") {
                 Label(name, systemImage: "person.crop.circle.fill")
+                Button("Refresh library") { library.refresh() }
                 Button("Sign out", role: .destructive) {
+                    installs.cancelAll()
                     auth.signOut()
                     library.clear()
                 }
@@ -111,26 +116,78 @@ struct EpicSignInView: View {
                     Button("Refresh") { library.refresh() }
                 } else {
                     ForEach(library.games) { game in
-                        HStack(spacing: 12) {
-                            if let url = game.artworkURL {
-                                AsyncImage(url: url) { image in
-                                    image.resizable().aspectRatio(contentMode: .fit)
-                                } placeholder: {
-                                    ProgressView()
-                                }
-                                .frame(width: 44, height: 44)
-                                .cornerRadius(8)
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(game.title).font(.headline)
-                                Text("Installs in a later update")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
+                        EpicGameRow(game: game,
+                                    install: installs.state[game.appName],
+                                    installed: installs.record(appName: game.appName)) {
+                            installs.install(game: game, drive: LibraryModel.drive)
+                        } onOpen: {
+                            openInstalled(game)
                         }
                     }
-                    Button("Refresh") { library.refresh() }
                 }
             }
         }
+    }
+
+    /// Opens an installed Epic game's library entry (its Game details page).
+    private func openInstalled(_ game: EpicGame) {
+        guard let record = installs.record(appName: game.appName) else { return }
+        let entry = LibraryModel.shared.epicEntry(record)
+        dismiss()
+        // After the sheet finishes dismissing, as SteamGameSheet does.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { openEntry?(entry) }
+    }
+}
+
+/// One game's row: artwork, title, and its install state — Install, a progress
+/// bar while downloading, Play once installed (the entry opens Game details,
+/// whose Play starts the game as for any library game).
+private struct EpicGameRow: View {
+    let game: EpicGame
+    let install: EpicInstallModel.GameState?
+    let installed: EpicInstallRecord?
+    let onInstall: () -> Void
+    let onOpen: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if let url = game.artworkURL {
+                AsyncImage(url: url) { image in
+                    image.resizable().aspectRatio(contentMode: .fit)
+                } placeholder: {
+                    ProgressView()
+                }
+                .frame(width: 44, height: 44)
+                .cornerRadius(8)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(game.title).font(.headline)
+                switch install?.phase {
+                case .preparing:
+                    Text("Preparing...").font(.caption).foregroundStyle(.secondary)
+                case .downloading:
+                    if let install {
+                        Text("Downloading \(Int(install.fraction * 100))%")
+                            .font(.caption).foregroundStyle(.secondary)
+                        ProgressView(value: install.fraction)
+                    }
+                case .failed(let reason):
+                    Text("Download failed: \(reason)").font(.caption).foregroundStyle(.red)
+                    Button("Try again") { onInstall() }.font(.caption)
+                case .none:
+                    if installed != nil {
+                        Button("Play") { onOpen() }
+                            .font(.caption).buttonStyle(.borderedProminent)
+                    } else {
+                        Button("Install") { onInstall() }
+                            .font(.caption).buttonStyle(.bordered)
+                    }
+                default:
+                    Text("Finishing...").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+        }
+        .disabled(install != nil && install.phase != .failed)
     }
 }

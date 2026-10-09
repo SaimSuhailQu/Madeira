@@ -49,6 +49,10 @@
 		A1000920 /* Epic/EpicAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000920 /* EpicAuth.swift */; };
 		A1000921 /* Epic/EpicAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000921 /* EpicAPI.swift */; };
 		A1000922 /* Epic/EpicSignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000922 /* EpicSignInView.swift */; };
+		A1000923 /* Epic/EpicManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000923 /* EpicManifest */; };
+		A1000924 /* Epic/EpicChunk.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000924 /* EpicChunk */; };
+		A1000925 /* Epic/EpicInstall.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000925 /* EpicInstall */; };
+		A1000926 /* Epic/EpicInstallModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000926 /* EpicInstallModel */; };
 		A1000512 /* SwiftSteam/Auth/SteamAuthAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000512 /* SteamAuthAPI.swift */; };
 		A1000513 /* SwiftSteam/Auth/SteamCredentialAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000513 /* SteamCredentialAuth.swift */; };
 		A1000514 /* SwiftSteam/Auth/SteamQRAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000514 /* SteamQRAuth.swift */; };
@@ -221,6 +225,10 @@
 		A2000920 /* EpicAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Epic/EpicAuth.swift"; sourceTree = "<group>"; };
 		A2000921 /* EpicAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Epic/EpicAPI.swift"; sourceTree = "<group>"; };
 		A2000922 /* EpicSignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Epic/EpicSignInView.swift"; sourceTree = "<group>"; };
+		A2000923 /* EpicManifest */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Epic/EpicManifest.swift"; sourceTree = "<group>"; };
+		A2000924 /* EpicChunk */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Epic/EpicChunk.swift"; sourceTree = "<group>"; };
+		A2000925 /* EpicInstall */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Epic/EpicInstall.swift"; sourceTree = "<group>"; };
+		A2000926 /* EpicInstallModel */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Epic/EpicInstallModel.swift"; sourceTree = "<group>"; };
 		A2000512 /* SteamAuthAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamAuthAPI.swift"; sourceTree = "<group>"; };
 		A2000513 /* SteamCredentialAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamCredentialAuth.swift"; sourceTree = "<group>"; };
 		A2000514 /* SteamQRAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamQRAuth.swift"; sourceTree = "<group>"; };
@@ -437,6 +445,10 @@
 				A2000920 /* EpicAuth.swift */,
 				A2000921 /* EpicAPI.swift */,
 				A2000922 /* EpicSignInView.swift */,
+				A2000923 /* EpicManifest */,
+				A2000924 /* EpicChunk */,
+				A2000925 /* EpicInstall */,
+				A2000926 /* EpicInstallModel */,
 				A2000512 /* SteamAuthAPI.swift */,
 				A2000513 /* SteamCredentialAuth.swift */,
 				A2000514 /* SteamQRAuth.swift */,
@@ -763,6 +775,10 @@
 				A1000920 /* Epic/EpicAuth.swift in Sources */,
 				A1000921 /* Epic/EpicAPI.swift in Sources */,
 				A1000922 /* Epic/EpicSignInView.swift in Sources */,
+				A1000923 /* Epic/EpicManifest.swift in Sources */,
+				A1000924 /* Epic/EpicChunk.swift in Sources */,
+				A1000925 /* Epic/EpicInstall.swift in Sources */,
+				A1000926 /* Epic/EpicInstallModel.swift in Sources */,
 				A1000512 /* SwiftSteam/Auth/SteamAuthAPI.swift in Sources */,
 				A1000513 /* SwiftSteam/Auth/SteamCredentialAuth.swift in Sources */,
 				A1000514 /* SwiftSteam/Auth/SteamQRAuth.swift in Sources */,

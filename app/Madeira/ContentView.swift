@@ -2150,7 +2150,7 @@ struct ContentView: View {
         .sheet(item: $devSheet) { sheet in
             switch sheet {
             case .steamSignIn: SteamSignInView()
-            case .epicSignIn: EpicSignInView()
+            case .epicSignIn: EpicSignInView { entry in launchLibraryEntry(entry) }
             case .dock: MadeiraDockView { startDock($0, compactPool: $1) }
             case .allSettings: AllSettingsView()
             }

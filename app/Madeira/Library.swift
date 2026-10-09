@@ -280,6 +280,10 @@ struct LibraryEntry: Codable, Identifiable {
     /// MetalFX spatial upscaling factor (Display › MetalFX upscaling: 1.5 or 2;
     /// nil = off), passed on as this game's `metalfx-upscale` line.
     var metalFXUpscale: Double?
+    /// An Epic game installed by the library's Epic section (EpicInstall.swift):
+    /// Madeira starts its own program in Wine like any library game, and
+    /// `relativePath` is its install folder, relative to drive_c.
+    var epicAppName: String?
 
     /// What MadeiraConfig.applyGame writes for this game: the lines its pickers
     /// stand for, then its own config, which wins where both set a key.
@@ -751,10 +755,67 @@ final class LibraryModel: ObservableObject {
         entry.folderBytes = SteamInstallFiles.sizeOnDisk(appID: game.id, steamApps: Self.drive.appendingPathComponent(game.library, isDirectory: true)) ?? entry.folderBytes
         save(entry)
     }
+    /// An Epic game's library entry from its install record, without saving
+    /// (EpicInstall.swift): for opening Game details before anything changed.
+    func epicEntry(_ record: EpicInstallRecord) -> LibraryEntry {
+        let folder = record.folder
+        if var existing = entries.first(where: { $0.epicAppName == record.appName }) {
+            existing.relativePath = folder
+            return existing
+        }
+        var entry = LibraryEntry(title: record.title, relativePath: folder, bits: 0)
+        entry.epicAppName = record.appName
+        entry.folderBytes = record.installSize
+        if !record.launchExe.isEmpty, (try? Self.executable(folder + "/" + record.launchExe)) != nil {
+            entry.relativePath = folder + "/" + record.launchExe
+        }
+        if let url = try? Self.executable(entry.relativePath), let inspected = try? Self.inspect(url) {
+            entry.bits = inspected.bits
+            entry.graphicsAPI = inspected.graphicsAPI
+        }
+        return entry
+    }
     /// A Steam game was uninstalled: its entry goes with its files.
     func removeSteam(appID: Int) {
         guard entries.contains(where: { $0.steamAppID == appID }) else { return }
         persist(entries.filter { $0.steamAppID != appID })
+    }
+    /// An Epic game's library entry (EpicInstall.swift): one entry per app name,
+    /// made from the install record when its download finishes, like Steam's
+    /// upsertSteam. The manifest's launch executable is picked when it exists;
+    /// Game details' Program picker can change it later.
+    func upsertEpic(_ record: EpicInstallRecord) {
+        guard !readOnly else { return }
+        let folder = record.folder
+        var entry: LibraryEntry
+        if var existing = entries.first(where: { $0.epicAppName == record.appName }) {
+            existing.relativePath = folder
+            existing.title = record.title
+            entry = existing
+        } else {
+            entry = LibraryEntry(title: record.title, relativePath: folder, bits: 0)
+            entry.epicAppName = record.appName
+        }
+        entry.folderBytes = record.installSize
+        // The manifest's launch executable, when the record names one that is there.
+        if !record.launchExe.isEmpty,
+           (try? Self.executable(folder + "/" + record.launchExe)) != nil {
+            entry.relativePath = folder + "/" + record.launchExe
+        }
+        if entry.bits == 0, let url = try? Self.executable(entry.relativePath) {
+            // Bits and graphics API come from the program, as Steam's metadata read does.
+            if let inspected = try? Self.inspect(url) {
+                entry.bits = inspected.bits
+                if entry.graphicsAPI == nil { entry.graphicsAPI = inspected.graphicsAPI }
+            }
+        }
+        save(entry)
+        LogStore.shared.log("[epic-games] installed app=\(record.appName) build=\(record.buildVersion) bytes=\(record.installSize)")
+    }
+    /// An Epic game was uninstalled: its entry goes with its files.
+    func removeEpic(appName: String) {
+        guard entries.contains(where: { $0.epicAppName == appName }) else { return }
+        persist(entries.filter { $0.epicAppName != appName })
     }
     @discardableResult
     private func persist(_ next: [LibraryEntry]) -> Bool {
@@ -2147,11 +2208,12 @@ struct LibraryCells<Item: Identifiable, Cell: View>: View {
 /// added and Steam's games together, each group in the library's Sort by order.
 enum LibraryGrouping {
     enum Source: Hashable {
-        case entry(UUID), steam(Int)
+        case entry(UUID), steam(Int), epic(String)
         var key: String {
             switch self {
             case .entry(let id): return "entry:" + id.uuidString
             case .steam(let appID): return "steam:\(appID)"
+            case .epic(let appName): return "epic:\(appName)"
             }
         }
     }
@@ -2365,6 +2427,10 @@ struct LibraryGroupedGames<LocalCell: View>: View {
         switch game.source {
         case .entry(let id):
             if let entry = sources.entries[id] { localCell(entry, list, dense) }
+        case .epic(let appName):
+            // An Epic game without a library entry yet: installing. Not openable.
+            EmptyView()
+                .accessibilityLabel("Installing \(appName)")
         case .steam(let appID):
             if let item = sources.steam[appID] {
                 Button {
@@ -2624,7 +2690,7 @@ struct LibraryView: View {
             switch sheet {
             case .allSettings: AllSettingsView()
             case .steamSignIn: SteamSignInView()
-            case .epicSignIn: EpicSignInView()
+            case .epicSignIn: EpicSignInView { entry in selected = entry }
             case .dock: MadeiraDockView(start: startDock)
             }
         }

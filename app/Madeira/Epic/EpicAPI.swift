@@ -14,6 +14,8 @@ struct EpicGame: Identifiable, Codable {
     var title: String
     var namespace: String
     var artworkURL: URL?
+    /// The library record's catalog item id (the manifest API names it).
+    var catalogItemID: String?
 
     var id: String { appName }
 }
@@ -31,6 +33,7 @@ private struct EpicLibraryRecord: Codable {
     var appName: String?
     var title: String?
     var namespace: String?
+    var id: String?
     var metadata: EpicRecordMetadata?
 }
 
@@ -72,8 +75,7 @@ final class EpicLibrary: ObservableObject {
         error = nil
         Task {
             do {
-                let token = try await EpicAuth.shared.validAccessToken()
-                let games = try await fetchAll(token: token)
+                let games = try await refreshAsync()
                 await MainActor.run {
                     self.games = games
                     self.isLoading = false
@@ -85,6 +87,13 @@ final class EpicLibrary: ObservableObject {
                 }
             }
         }
+    }
+
+    /// The owned list, fetched now (refresh() wraps it for the sheet; an install
+    /// calls it when the library was never read this run).
+    func refreshAsync() async throws -> [EpicGame] {
+        let token = try await EpicAuth.shared.validAccessToken()
+        return try await fetchAll(token: token)
     }
 
     private func fetchAll(token: String) async throws -> [EpicGame] {
@@ -106,7 +115,8 @@ final class EpicLibrary: ObservableObject {
                 appName: appName,
                 title: title,
                 namespace: record.namespace ?? "",
-                artworkURL: Self.artwork(from: record.metadata?.keyImages, preferring: artworkPreference)
+                artworkURL: Self.artwork(from: record.metadata?.keyImages, preferring: artworkPreference),
+                catalogItemID: record.id
             )
         }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
@@ -120,6 +130,22 @@ final class EpicLibrary: ObservableObject {
             }
         }
         return nil
+    }
+
+    /// What an install needs for a game (EpicInstall.swift): its namespace and
+    /// catalog item id, from the library records already fetched. nil while the
+    /// library has not listed the game.
+    func meta(for game: EpicGame) async throws -> (namespace: String, catalogItemID: String)? {
+        if let known = games.first(where: { $0.appName == game.appName }),
+           let catalogItemID = known.catalogItemID, !catalogItemID.isEmpty {
+            return (known.namespace, catalogItemID)
+        }
+        // The library was never fetched this run (an install without the sheet).
+        let fetched = try await refreshAsync()
+        await MainActor.run { self.games = fetched }
+        guard let known = fetched.first(where: { $0.appName == game.appName }),
+              let catalogItemID = known.catalogItemID, !catalogItemID.isEmpty else { return nil }
+        return (known.namespace, catalogItemID)
     }
 
     private func fetchPage(token: String, cursor: String?) async throws -> ([EpicLibraryRecord], String?) {
