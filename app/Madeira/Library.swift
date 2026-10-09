@@ -2639,7 +2639,15 @@ struct LibraryView: View {
             if SteamSettingsSection.shown, settingsShow("Steam", "Dock", "sign in", "account", "setup") {
                 SteamSettingsSection(open: { settingsSheet = $0 })
             }
+            if settingsShow("epic", "legendary", "epic games", "sign in", "account") {
+                Section("Epic Games (Legendary)") {
+                    Button { settingsSheet = .epicSignIn } label: {
+                        Label(EpicAuth.shared.signedIn ? "Epic Games: \(EpicAuth.shared.accountName ?? "Signed in")" : "Sign in to Epic Games", systemImage: "gamecontroller")
+                    }
+                }
+            }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
+            if settingsShow("ubisoft", "connect", "uplay", "launcher") { UbisoftConnectSettingsSection() }
             if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
             if settingsShow("appearance", "liquid metal", "metal", "glass") {
                 Section {
