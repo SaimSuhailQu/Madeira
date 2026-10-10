@@ -79,6 +79,36 @@ final class MetalHostView: UIView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+/// Touches on the game view outside the on-screen controls reach the program as
+/// a mouse. Some games (Dark Souls Remastered) switch to keyboard and mouse
+/// prompts on any mouse event and then ignore the controller, so a stray tap
+/// next to a touch button costs the player the controller. MADEIRA_TOUCH_MOUSE
+/// (madeira.cfg `env.NAME`, else the process environment): "1" always sends
+/// them (the previous behaviour), "0" never does, and by default they are not
+/// sent while the landscape overlay shows at least one controller mapping,
+/// unless touch is set to work as a trackpad. A hardware mouse or trackpad is
+/// not affected.
+@MainActor enum TouchMouseGate {
+    enum Mode: String { case auto, on, off }
+    static let mode: Mode = {
+        let v = MadeiraConfig.get("env.MADEIRA_TOUCH_MOUSE")  // 1: touches always reach the program as a mouse, 0: never; default: not while touch controller mappings are shown
+            ?? ProcessInfo.processInfo.environment["MADEIRA_TOUCH_MOUSE"]
+        let m: Mode = v == "1" ? .on : (v == "0" ? .off : .auto)
+        LogStore.shared.log("[touch-mouse] mode=\(m.rawValue)")
+        return m
+    }()
+    /// Set by TouchControlsOverlay.configureGamepad: the landscape overlay is
+    /// visible, not editing, and has at least one controller mapping.
+    static var padOverlay = false
+    static func suppressing(touchpad: Bool) -> Bool {
+        switch mode {
+        case .on: return false
+        case .off: return true
+        case .auto: return padOverlay && !touchpad
+        }
+    }
+}
+
 // SwiftUI-hosted placeholder: geometry + touch input only.
 final class MetalBackedView: UIView {
     private static var layerRegistered = false
@@ -457,8 +487,12 @@ final class MetalBackedView: UIView {
     // follow via winios_pointer / winios_cursor_move.
     // ==================================================================
     // Internal, not private: a hardware mouse moves the same desktop cursor
-    // (HardwareInput.followDesktopCursor).
-    static var cursor = CGPoint(x: 480, y: 270)
+    // (HardwareInput.followDesktopCursor). ml1157: it starts at the centre of
+    // whatever desktop size was launched (static, so it is first read at the
+    // first use -- after MADEIRA_SCREEN_* are set).
+    static var cursor = CGPoint(
+        x: CGFloat(getenv("MADEIRA_SCREEN_W").flatMap { Int(String(cString: $0)) } ?? 960) / 2,
+        y: CGFloat(getenv("MADEIRA_SCREEN_H").flatMap { Int(String(cString: $0)) } ?? 540) / 2)
     private var lastPanPoint = CGPoint.zero
     private var touchStartPoint = CGPoint.zero
     private var touchStartTime: TimeInterval = 0
@@ -503,8 +537,33 @@ final class MetalBackedView: UIView {
         (event?.allTouches ?? []).filter { $0.phase != .ended && $0.phase != .cancelled }
     }
 
+    // Direct touches that began while TouchMouseGate was suppressing stay
+    // swallowed until they lift, so a change of the gate never leaves a button held.
+    private var tmgSwallowed: Set<ObjectIdentifier> = []
+    /// Returns the touches that should still be handled (nil = nothing left).
+    private func tmgFilter(_ touches: Set<UITouch>, _ phase: UITouch.Phase) -> Set<UITouch>? {
+        if phase == .began {
+            _ = TouchMouseGate.mode   // logs the mode once
+            guard TouchMouseGate.suppressing(touchpad: touchPointerMode) else { return touches }
+            let direct = touches.filter { $0.type == .direct }
+            guard !direct.isEmpty else { return touches }
+            for t in direct { tmgSwallowed.insert(ObjectIdentifier(t)) }
+            let rest = touches.subtracting(direct)
+            return rest.isEmpty ? nil : rest
+        }
+        guard !tmgSwallowed.isEmpty else { return touches }
+        let mine = touches.filter { tmgSwallowed.contains(ObjectIdentifier($0)) }
+        guard !mine.isEmpty else { return touches }
+        if phase == .ended || phase == .cancelled {
+            for t in mine { tmgSwallowed.remove(ObjectIdentifier(t)) }
+        }
+        let rest = touches.subtracting(mine)
+        return rest.isEmpty ? nil : rest
+    }
+
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .began) { return }
+        guard let touches = tmgFilter(touches, .began) else { return }
         if touchPointerMode { touchModeBegan(touches); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -551,6 +610,7 @@ final class MetalBackedView: UIView {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .moved) { return }
+        guard let touches = tmgFilter(touches, .moved) else { return }
         if touchPointerMode { touchModeMoved(touches, event); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -632,6 +692,7 @@ final class MetalBackedView: UIView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .ended) { return }
+        guard let touches = tmgFilter(touches, .ended) else { return }
         if touchPointerMode { touchModeEnded(touches, event); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -675,6 +736,7 @@ final class MetalBackedView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .cancelled) { return }
+        guard let touches = tmgFilter(touches, .cancelled) else { return }
         if touchPointerMode { touchModeCancelled(touches); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -1178,14 +1240,16 @@ struct ContentView: View {
     }
     @State private var devSheet: SettingsSheet?
     @StateObject private var logStore = LogStore.shared
+    @StateObject private var jitCoordinator = JITCoordinator.shared
     @State private var jitStatus: JITStatus = .unknown
+    /// Play without JIT: the start that waits for Enable JIT (jitReadyForLaunch).
+    @State private var launchAfterJIT: (() -> Void)?
     @State private var entitlements: EntitlementStatus?
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
     @State private var pointerPanel = false
+    @State private var desktopSizeTick = 0   // ml1157: bumps after a Resolution pick
     @Namespace private var pointerNS
-    /// .compact = iPhone landscape: game surface expands, arrow keys appear.
-    @Environment(\.verticalSizeClass) private var vSizeClass
     /// The library front end (Library.swift). When it is the chosen interface it
     /// replaces both bodies below, and a running library session gets the
     /// full-screen `sessionBody`.
@@ -1213,19 +1277,14 @@ struct ContentView: View {
             Group {
                 if library.enabled && library.current != nil {
                     sessionBody
+                        .navigationBarHidden(true)
                 } else if library.enabled {
-                    LibraryView(play: launchLibraryEntry, enableJIT: enableJITViaStikDebug,
+                    LibraryView(play: launchLibraryEntry, enableJIT: enableJIT,
                                 startDock: { startDock($0, compactPool: $1) })
-                } else if vSizeClass == .compact {
-                    landscapeBody
                 } else {
-                    portraitBody
+                    developerBody
                 }
             }
-            // Rotation destroys/recreates the UIViewRepresentable across
-            // this if/else (two SwiftUI identities) — HARMLESS since
-            // 2026-07-05: MetalHostView is a process-lifetime singleton;
-            // a fresh placeholder only re-parents the same CAMetalLayer.
             .navigationTitle("Madeira")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.regularMaterial, for: .navigationBar)
@@ -1234,7 +1293,6 @@ struct ContentView: View {
             // under the title, the buttons and the search field behind a
             // progressive blur (as in the App Store), with no hard edge.
             .toolbarBackground(library.enabled && !Self.systemScrollEdge ? .visible : .automatic, for: .navigationBar)
-            .navigationBarHidden(library.enabled ? library.current != nil : vSizeClass == .compact)
             // A second session cannot start in this process; offer to close Madeira.
             .alert("Restart Madeira", isPresented: Binding(get: { library.restartNotice != nil },
                                                             set: { if !$0 { library.restartNotice = nil } })) {
@@ -1244,6 +1302,34 @@ struct ContentView: View {
                 }
                 Button("Later", role: .cancel) { library.restartNotice = nil }
             } message: { Text(library.restartNotice ?? "") }
+            // CS_DEBUGGED without a debugger (JIT enabled outside Madeira): offer Madeira's own request.
+            .alert("Enable JIT", isPresented: Binding(get: { library.jitNotice != nil },
+                                                      set: { if !$0 { library.jitNotice = nil } })) {
+                Button("Enable JIT") { library.jitNotice = nil; enableJIT() }
+                Button("Later", role: .cancel) { library.jitNotice = nil }
+            } message: { Text(library.jitNotice ?? "") }
+            .sheet(isPresented: $jitCoordinator.showSetup) { JITSetupView() }
+            // A Steam game's saves may not be the latest (cloudClear).
+            .alert(library.cloudNotice?.title ?? "Steam Cloud", isPresented: Binding(get: { library.cloudNotice != nil },
+                                                                                     set: { if !$0 { library.cloudNotice = nil } })) {
+                if let notice = library.cloudNotice {
+                    switch notice.kind {
+                    case .syncing: Button("Wait and sync") { library.cloudNotice = nil; cloudWait(notice.appID) }
+                    case .unchecked: Button("Try again") { library.cloudNotice = nil; cloudWait(notice.appID) }
+                    case .conflict:
+                        Button("Choose") {
+                            library.cloudNotice = nil; library.cloudRetry = nil
+                            library.showDetail = library.entries.first { $0.steamAppID == notice.appID }?.id
+                        }
+                    }
+                    Button("Launch anyway") {
+                        LogStore.shared.log("[steam-cloud] app=\(notice.appID) before-play: launched anyway")
+                        library.cloudNotice = nil; library.cloudBypass = notice.appID
+                        let retry = library.cloudRetry; library.cloudRetry = nil; retry?()
+                    }
+                    Button("Cancel", role: .cancel) { library.cloudNotice = nil; library.cloudRetry = nil }
+                }
+            } message: { Text(library.cloudNotice?.message ?? "") }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
                 library.refreshFlag()
                 if library.enabled && library.current == nil { MetalHostView.shared.isHidden = true }
@@ -1253,6 +1339,8 @@ struct ContentView: View {
                 entitlements = EntitlementStatus.check()
                 logEntitlementStatus()
                 logStore.log("[build] \(BuildStamp.text)")
+                DeviceDiagnostics.logStartup()
+                DockOffline.begin()
                 FrontendChoice.logStartup()
                 DeviceLoadDiagnostics.start()
                 // Madeira Dock: an unconsumed sign-in transfer from an earlier run goes.
@@ -1261,7 +1349,43 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: SteamSignIn.didChange)) { _ in
                 if !SteamSignIn.isSignedIn { MadeiraDock.cleanup() }
             }
+            // A Home Screen shortcut (madeira://play?exe=...) starts its library entry,
+            // now or, from a cold start, once the library is up.
+            .onReceive(ShortcutRouter.shared.$pendingExe) { _ in launchPendingShortcut() }
+            .onChange(of: library.enabled) { _, _ in launchPendingShortcut() }
         }
+    }
+
+    /// The developer interface. Orientation comes from the view's own shape, not
+    /// verticalSizeClass: iPad is .regular in BOTH orientations, so the size-class
+    /// test kept the portrait tooling (badges, buttons, log) on screen after
+    /// rotating. On iPad the keyboard is excluded from the measurement, otherwise
+    /// raising it in portrait would make the view wider than tall; an iPhone's
+    /// keyboard never does, so there the portrait layout still makes room for it.
+    private var developerBody: some View {
+        GeometryReader { geo in
+            let landscape = geo.size.width > geo.size.height
+            Group {
+                if landscape {
+                    landscapeBody
+                } else {
+                    portraitBody
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            // Rotation destroys/recreates the UIViewRepresentable across
+            // this if/else (two SwiftUI identities) — HARMLESS since
+            // 2026-07-05: MetalHostView is a process-lifetime singleton;
+            // a fresh placeholder only re-parents the same CAMetalLayer.
+            .navigationBarHidden(landscape)
+            // ml1157: landscape is the desktop, edge to edge -- no status bar
+            // over its top rows, and the home indicator fades out.
+            .statusBarHidden(landscape)
+            .persistentSystemOverlays(landscape ? .hidden : .automatic)
+            // The landscape controls window re-frames to the rotated scene.
+            .onChange(of: landscape) { _, _ in TouchControlsHost.attach() }
+        }
+        .ignoresSafeArea(UIDevice.current.userInterfaceIdiom == .pad ? .keyboard : [])
     }
 
     /// A library session: the game full screen in either orientation, with the
@@ -1365,6 +1489,10 @@ struct ContentView: View {
             ZStack {
                 Color.black
                 MadeiraMetalView()
+                    // A launch straight into landscape never shows the portrait
+                    // layout, which is otherwise what creates the controls window
+                    // (its top bar carries the keyboard button here).
+                    .onAppear { TouchControlsHost.attach() }
                 // Controls removed for now (ml586): game-only landscape.
                 // The FPS readout stays, pinned in the right pillarbox bar —
                 // the window-level surface covers anything drawn over the
@@ -1524,8 +1652,10 @@ struct ContentView: View {
         logStore.log("  allow-jit: \(ents.jitAllowed)", level: ents.jitAllowed ? .success : .error)
         logStore.log("  increased-memory-limit: \(ents.increasedMemory)", level: ents.increasedMemory ? .success : .debug)
         logStore.log("  extended-virtual-addressing: \(ents.extendedVA)", level: ents.extendedVA ? .success : .debug)
-        if !ents.extendedVA {
-            logStore.log("  Tip: Use GetMoreRam to inject extended-virtual-addressing", level: .info)
+        // The memory limit is the entitlement a session needs; the address map may
+        // be the standard 63 GB one.
+        if !ents.increasedMemory {
+            logStore.log("  Tip: Use GetMoreRam to add increased-memory-limit", level: .info)
         }
     }
 
@@ -1543,7 +1673,7 @@ struct ContentView: View {
                 Button("All settings") { devSheet = .allSettings }
                     .buttonStyle(.bordered)
                 Button("Enable JIT") {
-                    enableJITViaStikDebug()
+                    enableJIT()
                 }
                 .buttonStyle(.borderedProminent)
 
@@ -1816,6 +1946,8 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
 
+                resolutionPicker
+
                 Button("Wine Virtual Desktop") {
                     // S3-pre R2v2: raw rpcss.exe CANNOT run standalone —
                     // its wmain unconditionally StartServiceCtrlDispatcherW's
@@ -1835,12 +1967,11 @@ struct ContentView: View {
                     // Known risk: if shellwindows_init beats services.exe's
                     // RPC_Init, OpenSCManager fails → watch whether that
                     // fails fast or hits the RaiseException→CS wedge again.
-                    // ml1127: `desktop-size = WxH` in madeira.cfg; 960x540 otherwise.
-                    var deskW = 960, deskH = 540
-                    if let txt = MadeiraConfig.get("desktop-size") {
-                        let p = txt.lowercased().split(separator: "x").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-                        if p.count == 2, p[0] >= 640, p[1] >= 360, p[0] <= 3840, p[1] <= 2160 { deskW = p[0]; deskH = p[1] }
-                    }
+                    // ml1127: `desktop-size = WxH` in madeira.cfg (the Resolution
+                    // menu writes it). ml1157/ml1172: otherwise the screen's own
+                    // shape (ResolutionChoices), so the desktop fills a landscape
+                    // screen with no bars.
+                    let (deskW, deskH) = configuredDesktopSize(default: ResolutionChoices.defaultSize())
                     setenv("MADEIRA_EXE", "explorer.exe", 1)
                     setenv("MADEIRA_ARGS",
                            "/desktop=shell,\(deskW)x\(deskH) C:\\windows\\system32\\services.exe", 1)
@@ -1911,8 +2042,7 @@ struct ContentView: View {
 
                 Button("Thumper (standalone)") {
                     // Game lives at Documents/wine/drive_c/Program Files/Thumper/
-                    // (push via scripts/deploy-thumper.sh during development;
-                    // bundled as resource for distribution later).
+                    // (copied into the prefix by hand during development).
                     setenv("MADEIRA_EXE",
                            "C:\\Program Files\\Thumper\\THUMPER_win10.exe", 1)
                     unsetenv("MADEIRA_ARGS")
@@ -2224,19 +2354,149 @@ struct ContentView: View {
         }
     }
 
-    private func enableJITViaStikDebug() {
+    private func enableJIT() {
+        // Explains why JIT cannot be enabled on a copy signed without get-task-allow; 0 opens StikDebug regardless.
+        // A debugger can attach only to a process whose signature carries
+        // get-task-allow (a development signature). A copy signed with a
+        // distribution or enterprise certificate lacks it, StikDebug can never
+        // attach, and CS_DEBUGGED never appears however often this is tapped.
+        if !SigningStatus.current.debuggable, MadeiraConfig.flag("MADEIRA_JIT_SIGNING_CHECK") {
+            jitStatus = .unavailable
+            logStore.log(String(format: "[jit-signing] get-task-allow is missing (cs-flags=0x%x): no debugger can attach to this copy, "
+                                + "so JIT cannot be enabled. Reinstall Madeira with a development certificate.",
+                                SigningStatus.current.flags), level: .error)
+            if library.enabled { library.error = SigningStatus.notDebuggableMessage }
+            launchAfterJITEnded(started: false)
+            return
+        }
         jitStatus = .testing
-        logStore.log("Requesting JIT via StikDebug URL scheme...")
+        logStore.log("Requesting JIT with \(jitCoordinator.resolvedMethod.title)...")
 
-        StikJITHelper.enableJIT { success in
-            if success {
+        jitCoordinator.enable { result in
+            switch result {
+            case .success:
                 jitStatus = .available
                 logStore.log("JIT enabled! Debugger attached.", level: .success)
-            } else {
+                launchAfterJITEnded(started: true)
+            case .failure(let failure):
+                launchAfterJITEnded(started: false)
+                if let coordinatorError = failure as? JITCoordinator.CoordinatorError,
+                   case .setupRequired = coordinatorError {
+                    jitStatus = .unknown
+                    return
+                }
                 jitStatus = .unavailable
-                logStore.log("Failed to enable JIT via StikDebug", level: .error)
+                logStore.log("Failed to enable JIT: \(failure.localizedDescription)", level: .error)
+                if library.enabled { library.error = failure.localizedDescription }
             }
         }
+    }
+
+    /// Enable JIT finished: a Play that waited for it starts its game, only when the
+    /// debugger is attached (so the start cannot ask for JIT again) and nothing else
+    /// started meanwhile. A failure drops it: a later Enable JIT starts no game.
+    private func launchAfterJITEnded(started: Bool) {
+        guard let launch = launchAfterJIT else { return }
+        launchAfterJIT = nil
+        library.startingJIT = nil
+        guard started, StikJITHelper.ready, library.current == nil, wine_process_is_running() == 0 else {
+            logStore.log("[jit-on-play] JIT did not come on: the game was not started")
+            // A failure has its own error; this one closes the details page as well.
+            if started, library.current == nil { library.error = "JIT is on, but the game could not start. Tap Play again." }
+            return
+        }
+        logStore.log("[jit-on-play] JIT is on: starting the game")
+        launch()
+    }
+
+    /// Whether a launch may ask for the JIT pool. In the library, `then` makes Play
+    /// enable JIT itself (the same flow as Enable JIT, LocalDevVPN and the Madeira JIT
+    /// shortcut included) and start the game once the debugger is attached; that also
+    /// covers CS_DEBUGGED set with no debugger attached (JIT enabled from StikDebug's
+    /// own list, which attaches and leaves). Without `then`, the library offers
+    /// Madeira's Enable JIT instead of starting a launch that cannot get its pool.
+    private func jitReadyForLaunch(inLibrary: Bool, entry: UUID? = nil, then launch: (() -> Void)? = nil) -> Bool {
+        if StikJITHelper.ready { return true }
+        if inLibrary, let launch {
+            logStore.log("[jit-on-play] JIT is not on: enabling it, then starting the game")
+            launchAfterJIT = launch
+            library.startingJIT = entry
+            if jitStatus != .testing { enableJIT() }   // a second Play while it runs only replaces the game
+            return false
+        }
+        if StikJITHelper.flaggedWithoutDebugger {
+            logStore.log("[jit-debugger] launch held: CS_DEBUGGED is set but no debugger is attached; "
+                         + "JIT has to be enabled again from Madeira", level: .error)
+            if inLibrary { library.jitNotice = StikJITHelper.noDebuggerMessage }
+        } else {
+            logStore.log("JIT not enabled. Press 'Enable JIT' first.", level: .error)
+            if inLibrary { library.error = "Enable JIT before playing." }
+        }
+        return false
+    }
+
+    /// Whether a Steam game may start as far as its Steam Cloud saves go. If a sync
+    /// is running, the last check failed or never ran, or saves wait for a choice,
+    /// an alert asks first; `retry` starts the game again from there. A check that
+    /// is only old is repeated first, without asking.
+    private func cloudClear(_ appID: Int, name: String, retry: @escaping () -> Void) -> Bool {
+        guard library.enabled else { return true }
+        if library.cloudBypass == appID { library.cloudBypass = nil; return true }
+        guard let hold = SteamOwnedLibrary.shared.cloudHold(appID) else { return true }
+        library.cloudRetry = retry
+        if hold == .stale { cloudWait(appID); return false }
+        LogStore.shared.log("[steam-cloud] app=\(appID) before-play: held \(hold)")
+        library.cloudNotice = cloudNotice(appID, name: name, hold: hold)
+        return false
+    }
+
+    private func cloudNotice(_ appID: Int, name: String, hold: SteamOwnedLibrary.CloudHold) -> LibraryModel.CloudNotice {
+        switch hold {
+        case .syncing, .stale:
+            return .init(appID: appID, kind: .syncing, title: "Steam Cloud is still syncing",
+                         message: "\(name)'s saves are still being checked or downloaded. Starting now may leave you on older saves.")
+        case .unchecked(let why):
+            return .init(appID: appID, kind: .unchecked, title: "Steam Cloud could not be checked",
+                         message: "Madeira does not know whether \(name)'s saves on this device are the latest."
+                            + (why.map { " (\($0))" } ?? "") + " If another device has newer saves, starting now means choosing between them later.")
+        case .conflict(let count):
+            return .init(appID: appID, kind: .conflict, title: "Saves differ from Steam Cloud",
+                         message: "\(count) of \(name)'s save\(count == 1 ? "" : "s") differ\(count == 1 ? "s" : "") between this device and Steam Cloud. Choose which to keep on the game's page, or start with this device's saves.")
+        }
+    }
+
+    /// Syncs the game's saves, then starts it; if the saves are still not settled, asks again.
+    private func cloudWait(_ appID: Int) {
+        guard SteamOwnedLibrary.shared.cloudWaitingFor == nil else { return }
+        let name = MadeiraDock.games(drive: MadeiraDock.drive).first { $0.id == appID }?.name ?? "This game"
+        Task { @MainActor in
+            let hold = await SteamOwnedLibrary.shared.settleCloud(appID)
+            if let hold {
+                library.cloudNotice = cloudNotice(appID, name: name, hold: hold)
+            } else {
+                let retry = library.cloudRetry; library.cloudRetry = nil; retry?()
+            }
+        }
+    }
+
+    /// A Home Screen shortcut waiting for the library (a link opened at a cold start
+    /// arrives before the library is up).
+    private func launchPendingShortcut() {
+        guard library.enabled, library.current == nil, let exe = ShortcutRouter.shared.pendingExe else { return }
+        ShortcutRouter.shared.pendingExe = nil
+        launchShortcut(exe)
+    }
+
+    /// A Home Screen shortcut starts a game that is in the library, by its Windows
+    /// path. A link names any path, so one for a program not in the library starts
+    /// nothing: add it to the library first.
+    private func launchShortcut(_ exe: String) {
+        let key = exe.lowercased()
+        if let entry = library.entries.first(where: { $0.desktop != true && $0.windowsPath.lowercased() == key }) {
+            launchLibraryEntry(entry); return
+        }
+        LogStore.shared.log("[shortcut] \(exe) is not in the library: not started", level: .error)
+        library.error = "This shortcut's game is not in the library. Add it to the library, then use the shortcut again."
     }
 
     /// Play in the library (Library.swift): checks that a session can start,
@@ -2255,6 +2515,7 @@ struct ContentView: View {
             return
         }
         if let appID = entry.steamAppID {
+            guard cloudClear(appID, name: entry.title, retry: { launchLibraryEntry(entry) }) else { return }
             guard entry.steamProgram?.isEmpty == false else {
                 library.error = "Choose the program to start in Game details › Steam › Program."; return
             }
@@ -2270,20 +2531,31 @@ struct ContentView: View {
             library.restartNotice = LibraryModel.restartMessage; return
         }
         // The same precondition runWineFullSequence checks: the JIT pool is
-        // taken at launch, through the debugger.
-        guard jit_check_debugged() else {
-            library.error = "Enable JIT before playing."; return
-        }
+        // taken at launch, through the debugger. Without it, Play enables JIT and
+        // continues from here once it is on.
+        guard jitReadyForLaunch(inLibrary: true, entry: entry.id, then: { startLibraryEntry(entry) }) else { return }
+        startLibraryEntry(entry)
+    }
+
+    /// The rest of Play, with JIT on: checks the entry's launch profile and starts it.
+    private func startLibraryEntry(_ entry: LibraryEntry) {
         do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
         catch {
             library.error = error.localizedDescription
             logStore.log("[launch-preflight] profile validation failed: \(error.localizedDescription)", level: .error)
             return
         }
-        guard entry.launchWindowsPath.utf8.count < 1024, entry.launchArguments.utf8.count < 1024 else {
+        // launchArguments carries the whole ml1163 command (explorer's /desktop=, the quoted
+        // program, its arguments); validate() and the bridge's tokenizer take 4 KB.
+        guard entry.launchWindowsPath.utf8.count < 1024, entry.launchArguments.utf8.count < 4096 else {
             library.error = "The executable path or launch arguments are too long."; return
         }
         entry.configureLaunch()
+        // This run's log under the program's name too (Documents/logs). A Steam game started
+        // through Madeira Dock above gets its own from ntdll, once Valve's client starts it.
+        let program = entry.desktop == true ? "explorer.exe"
+            : entry.launchWindowsPath.split(separator: "\\").last.map(String.init) ?? entry.launchWindowsPath
+        LogStore.shared.startSessionLog(program: program)
         library.begin(entry)
         runWineFullSequence(profile: entry)
     }
@@ -2304,6 +2576,8 @@ struct ContentView: View {
         /* ml1095: one config file. Written once from any legacy madeira-*.txt. */
         MadeiraConfig.migrateLegacy { self.logStore.log($0) }
         MadeiraConfig.deleteLegacyFiles { self.logStore.log($0) }   /* ml1096: the old files go once the cfg exists */
+        /* ml2100: XInput (default) or the HID controller; before the wineserver starts. */
+        GamepadInput.shared.beginPadSession()
         /* ml1990: player 1 exists before the game enumerates XInput. */
         GamepadInput.shared.reserveSessionSlot(touchControls: TouchControlsModel.shared.offersControllerInput)
         if MadeiraConfig.present {
@@ -2314,6 +2588,7 @@ struct ContentView: View {
         }
 
         logStore.log("Running full Wine sequence...")
+        DeviceDiagnostics.logLaunch()
 
         // Start a main thread heartbeat to diagnose hang
         var heartbeatCount = 0
@@ -2336,6 +2611,8 @@ struct ContentView: View {
             if let profile {
                 profile.applyEnvironment()
                 logStore.log("[launch-route] library profile applied")
+            } else {
+                _ = try? MadeiraConfig.applyGame(nil)   // no library game: no game's own lines
             }
 
             // Step 1: Allocate JIT pool (BRK suspends entire process)
@@ -2439,6 +2716,15 @@ struct ContentView: View {
             } else {
                 unsetenv("MADEIRA_DOCK_SESSION")
             }
+            // A Dock session runs Valve's client headless, with no Chromium, so
+            // nothing claims the 8 GB V8 cage holdback (virtual_ios.c). Let ntdll
+            // hand it to the allocator when the guest band runs out. madeira.cfg
+            // env.MADEIRA_CAGE_RELEASE, exported later, wins.
+            if dockLaunch.dock {
+                setenv("MADEIRA_CAGE_RELEASE", "1", 1)
+            } else {
+                unsetenv("MADEIRA_CAGE_RELEASE")
+            }
             var poolSizeMB = DockPerformancePolicy.sessionPoolMB(standard: 896, dock: dockLaunch.dock, compact: dockLaunch.compact)
             if poolSizeMB != 896 { logStore.log("[dock-pool] compact JIT pool \(poolSizeMB)MB for this Dock launch") }
             // madeira.cfg pool: the JIT pool size in MB (256 to 1152) for every launch; wins over the size above.
@@ -2495,12 +2781,46 @@ struct ContentView: View {
             // d3d11.mipClampBC=N is the one that matters for memory: this GPU cannot
             // sample BC, so those textures are expanded to uncompressed and cost 2-8x
             // their shipped size.
-            if let txt = MadeiraConfig.get("dxmt") {
-                let v = txt.replacingOccurrences(of: ";", with: "\n").trimmingCharacters(in: .whitespacesAndNewlines)   /* ml1095: "a=b;c=d" on one line */
-                if !v.isEmpty {
-                    setenv("DXMT_CONFIG", v, 1)
-                    logStore.log("DXMT config: \(v) via madeira.cfg dxmt")
+            // DXMT splits DXMT_CONFIG on ";" only and a newline is not whitespace to
+            // its line parser, so the options are joined with ";" (ml1095: "a=b;c=d"
+            // on one line). A library game's own dxmt options come after madeira.cfg's.
+            // ml1255: "#" pieces (comments) are dropped; DXMT skips them anyway, but
+            // they would count against its length limit below.
+            var dxmtOptions: [String] = []
+            for (source, txt) in [("madeira.cfg dxmt", MadeiraConfig.get("dxmt")), ("the game's config", MadeiraConfig.gameValue("dxmt"))] {
+                let parts = (txt ?? "").split(whereSeparator: { $0 == ";" || $0.isNewline })
+                    .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
+                if !parts.isEmpty {
+                    dxmtOptions += parts
+                    logStore.log("DXMT config: \(parts.joined(separator: ";")) via \(source) (\(parts.count) option\(parts.count == 1 ? "" : "s"))")
                 }
+            }
+            // MetalFX spatial upscaling (metalfx-upscale; Game details › MetalFX
+            // upscaling writes it to the game's own lines). The D3D12 runtime reads
+            // the key itself; D3D11 games get DXMT's MetalFX swapchain at the same
+            // factor (DXMT takes 1 to 2).
+            if let txt = MadeiraConfig.gameValue("metalfx-upscale") ?? MadeiraConfig.get("metalfx-upscale"),
+               let factor = Double(txt), factor >= 1.1 {
+                setenv("DXMT_METALFX_SPATIAL_SWAPCHAIN", "1", 1)
+                dxmtOptions.append("d3d11.metalSpatialUpscaleFactor=\(min(factor, 2))")
+                logStore.log("MetalFX upscaling: \(txt)x via metalfx-upscale")
+            } else {
+                unsetenv("DXMT_METALFX_SPATIAL_SWAPCHAIN")
+            }
+            // A library entry's "Report an NVIDIA GPU" (LibraryEntry.applyEnvironment):
+            // DXGI's device id is the GeForce RTX 3060 win32u registers as the
+            // display adapter (sysparams_ios.c), so every API names one GPU.
+            if profile?.reportNVIDIA == true {
+                dxmtOptions.append("dxgi.customDeviceId=2544")
+                logStore.log("DXMT config: dxgi.customDeviceId=2544 via Report an NVIDIA GPU")
+            }
+            // Unset otherwise, so a previous session's options in this app process do not apply.
+            if !dxmtOptions.isEmpty { setenv("DXMT_CONFIG", dxmtOptions.joined(separator: ";"), 1) } else { unsetenv("DXMT_CONFIG") }
+            // ml1255: DXMT reads the variable into a MAX_PATH buffer (util_env.cpp
+            // getEnvVar); from a longer value it gets nothing, and every option is lost.
+            let dxmtLength = dxmtOptions.joined(separator: ";").utf16.count
+            if dxmtLength > 259 {
+                logStore.log("DXMT config is \(dxmtLength) characters; DXMT reads at most 259 and drops ALL of it -- shorten the dxmt lines of madeira.cfg and the game's config", level: .error)
             }
 
             // D3D9 frontend for 32-bit programs. The i386 d3d9.dll is DXMT's thin
@@ -2763,13 +3083,14 @@ struct ContentView: View {
                 // wrong conclusion I wrote into the source. A run without the pool can
                 // only manufacture misleading secondary crashes, so refuse to start one.
                 logStore.log("JIT pool allocation FAILED — not starting Wine.", level: .error)
-                logStore.log("  All placements landed in the forbidden guest 64G window.", level: .info)
-                logStore.log("  Force-quit and relaunch: placement is chosen by the kernel", level: .info)
-                logStore.log("  and depends on current memory layout, so a fresh process", level: .info)
-                logStore.log("  usually lands somewhere valid.", level: .info)
+                // The reason allocatePool recorded (no debugger, placement, alias);
+                // the lines above this one in the log carry the detail.
+                let reason = StikJITHelper.poolFailure
+                logStore.log("  " + (reason ?? "No reason was recorded; see the pool lines above."), level: .info)
                 logStore.uiPaused = false
                 // A library session that never started returns to the library.
-                DispatchQueue.main.async { LibraryModel.shared.launchFailed() }
+                let offerJIT = reason == StikJITHelper.noDebuggerMessage
+                DispatchQueue.main.async { LibraryModel.shared.launchFailed(reason, offerJIT: offerJIT) }
                 return
             }
 
@@ -2813,12 +3134,30 @@ struct ContentView: View {
 
             winios_phase("detach-done")
 
+            // The Madeira JIT shortcut turned Cellular Data off or connected LocalDevVPN
+            // for this JIT (JITNetwork.swift). The pool is mapped and the debugger is
+            // gone, so put them back now: running the shortcut leaves Madeira for a
+            // moment, which is safe only before Wine starts drawing.
+            JITNetworkShortcut.restoreBlocking()
+
             // Step 2: Start wineserver
             self.startWineserver()
             winios_phase("wineserver-up")
 
-            // Step 3: Start Wine (debugger still attached for PE loading BRK calls)
-            Thread.sleep(forTimeInterval: 2.0)
+            // Step 3: Start Wine.
+
+            // Wine starts as soon as the wineserver has finished starting up (its registry
+            // is loaded), normally within tens of milliseconds, instead of after a fixed
+            // 2 s pause. 0 restores the fixed pause.
+            if MadeiraConfig.flag("MADEIRA_FAST_SERVER_START") {
+                let waitStart = CFAbsoluteTimeGetCurrent()
+                while wineserver_is_ready() == 0, wineserver_is_running() != 0, CFAbsoluteTimeGetCurrent() - waitStart < 2.0 {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+                logStore.log(String(format: "[launch] wineserver ready after %.0f ms", (CFAbsoluteTimeGetCurrent() - waitStart) * 1000))
+            } else {
+                Thread.sleep(forTimeInterval: 2.0)
+            }
             winios_phase("wine-start")
             self.startWineProcess()
 
@@ -2918,11 +3257,9 @@ struct ContentView: View {
     /// session then takes that entry's display, performance and on-screen settings.
     private func startDock(_ game: DockGame, compactPool: Bool, profile: LibraryEntry? = nil) {
         let inLibrary = library.enabled
-        guard jit_check_debugged() else {
-            logStore.log("JIT not enabled. Press 'Enable JIT' first.", level: .error)
-            if inLibrary { library.error = "Enable JIT before playing." }
-            return
-        }
+        guard jitReadyForLaunch(inLibrary: inLibrary, entry: profile?.id,
+                                then: { startDock(game, compactPool: compactPool, profile: profile) }) else { return }
+        guard cloudClear(game.id, name: game.name, retry: { startDock(game, compactPool: compactPool, profile: profile) }) else { return }
         guard wine_process_is_running() == 0, wineserver_is_running() == 0, !inLibrary || library.current == nil else {
             logStore.log("[madeira-dock] a session already ran in this app run; restart Madeira first", level: .error)
             if inLibrary { library.error = "A session is already running." }
@@ -2950,10 +3287,20 @@ struct ContentView: View {
         // is handed to Valve's client, and it stays off until the Dock session has ended
         // (SteamOwnedLibrary.prepareDock / dockEnded, SteamConnectionGate).
         Task { @MainActor in
+            // Resolve the original config.launch key before closing the native connection.
+            // A filtered launch array can start at 1 (or have gaps); its offset is not the key.
+            // Without a choice (no configuration to be had, or no entry whose .exe is on disk:
+            // a launcher started through a .bat, say) it is key 0, which every Dock start
+            // used before; Dock stops at once if Steam names that entry missing.
+            let options = await SteamOwnedLibrary.shared.launchOptions(appID: game.id)
+            let installFolder = MadeiraDock.drive.appendingPathComponent(game.library + "/common/" + game.installDir)
+            let chosen = options.flatMap { SteamDirectStart.choose($0, installFolder: installFolder)?.launchIndex }
+            let launchOption = chosen ?? 0
+            LogStore.shared.log("[madeira-dock] launch option \(launchOption)\(chosen == nil ? " (none chosen: the default)" : "")")
             await SteamOwnedLibrary.shared.prepareDock()
             do {
                 // The launch state may have changed while the connection closed.
-                guard jit_check_debugged(), wine_process_is_running() == 0, wineserver_is_running() == 0,
+                guard StikJITHelper.ready, wine_process_is_running() == 0, wineserver_is_running() == 0,
                       !inLibrary || library.current == nil else {
                     throw DockError.message("The launch state changed. Enable JIT and try again.")
                 }
@@ -2962,7 +3309,7 @@ struct ContentView: View {
                 }
                 try MadeiraDock.writeHandoff(account: signIn.accountName, token: signIn.refreshToken, appID: game.id)
             } catch { fail(error); return }
-            MadeiraDock.configure(game)
+            MadeiraDock.configure(game, launchOption: launchOption)
             // The game's one-time installs (its Steam install script) run first, in the same
             // session. No session runs yet, so the registry files can be read and written.
             DockInstallers.prepare(game, drive: MadeiraDock.drive, prefix: MadeiraDock.prefix)
@@ -2984,7 +3331,11 @@ struct ContentView: View {
             // is unchanged; env.MADEIRA_GDI_SHARED_SECTION = 0 in madeira.cfg, exported after
             // this, keeps the default for Dock sessions too.
             setenv("MADEIRA_GDI_SHARED_SECTION", "1", 1)
-            var width = 1280, height = 720
+            // ml1185: without desktop-size or a game's Resolution, this screen's shape
+            // (ml1172's default: 1408x648 on a 19.5:9 iPhone, 1152x800 on an 11-inch
+            // iPad), as every library entry defaults to; a fixed 1280x720 left bars
+            // above and below on an iPad.
+            var (width, height) = ResolutionChoices.defaultSize()
             if let txt = MadeiraConfig.get("desktop-size") {
                 let p = txt.lowercased().split(separator: "x").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
                 if p.count == 2, p[0] >= 640, p[1] >= 360, p[0] <= 3840, p[1] <= 2160 { width = p[0]; height = p[1] }
@@ -3067,6 +3418,44 @@ struct ContentView: View {
         }
         logStore.log("Steam found at \(winDir)", level: .success)
         return true
+    }
+
+    /// ml1127: `desktop-size = WxH` from madeira.cfg, or `def` when absent or out of range.
+    /// ml1157: the desktop resolution menu. Saves `desktop-size` to madeira.cfg;
+    /// Wine reads it once per app launch, so while it runs the choice waits for
+    /// the next launch (the label says so).
+    /// ml1172: the choices are the library's (ResolutionChoices), grouped.
+    private var resolutionPicker: some View {
+        let _ = desktopSizeTick   // re-read the file after a pick
+        let (cw, ch) = configuredDesktopSize(default: ResolutionChoices.defaultSize())
+        let groups = ResolutionChoices.groups()
+        let custom = ResolutionChoices.extra("\(cw)x\(ch)", in: groups, note: "madeira.cfg")
+        let pending = wine_process_is_running() != 0
+        let pick = { (p: ResolutionChoices.Choice) in
+            Button {
+                MadeiraConfig.set("desktop-size", p.value)
+                desktopSizeTick += 1
+            } label: {
+                if p.w == cw && p.h == ch { Label(p.label, systemImage: "checkmark") } else { Text(p.label) }
+            }
+        }
+        return Menu {
+            ForEach(groups, id: \.title) { group in
+                Section(group.title) { ForEach(group.choices, id: \.value) { pick($0) } }
+            }
+            if let custom { pick(custom) }
+        } label: {
+            Label("\(cw)×\(ch)" + (pending ? " · next launch" : ""), systemImage: "rectangle.dashed")
+        }
+        .buttonStyle(.bordered)
+    }
+
+    private func configuredDesktopSize(default def: (Int, Int)) -> (Int, Int) {
+        if let txt = MadeiraConfig.get("desktop-size") {
+            let p = txt.lowercased().split(separator: "x").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            if p.count == 2, p[0] >= 640, p[1] >= 360, p[0] <= 3840, p[1] <= 2160 { return (p[0], p[1]) }
+        }
+        return def
     }
 
     private func startWineserver() {
@@ -3371,6 +3760,11 @@ struct TouchControl: Codable, Identifiable, Equatable {
     var ny: Double = 0.5
     var scale: Double = 1.0
     var action: ControlAction = .mouseLeft   // usable the moment it is created
+    /// A physical controller input that also performs this control's key or
+    /// mouse action when the game runs in keyboard-and-mouse controller mode
+    /// (PadKeyboardMouse): "A", "RT", "D↑", ...; "LS"/"RS" for a key stick.
+    /// Optional, so layouts saved before it existed still decode.
+    var padBinding: String?
 }
 
 final class TouchControlsModel: ObservableObject {
@@ -3461,10 +3855,11 @@ final class TouchControlsModel: ObservableObject {
     /// `topBar: false` in a library session, where LibraryHUD replaces the bar.
     func hitsInteractive(_ p: CGPoint, in bounds: CGRect, topBar: Bool = true) -> Bool {
         // Top bar: two 44pt buttons 10pt apart in play mode, centred, 10pt down,
-        // plus the layout menu while touch controls are on (ml1970).
+        // plus the layout menu while touch controls are on (ml1970), plus the
+        // keyboard button.
         // Padded generously; a few points of slop costs nothing and a missed tap
         // costs a build.
-        let buttons: CGFloat = TouchControlsOverlay.showsLayoutMenu(self) ? 3 : 2
+        let buttons: CGFloat = (TouchControlsOverlay.showsLayoutMenu(self) ? 3 : 2) + 1
         let barW: CGFloat = buttons * 44 + (buttons - 1) * 10
         if topBar, CGRect(x: bounds.midX - barW / 2 - 10, y: 0,
                           width: barW + 20, height: 68).contains(p) { return true }
@@ -3578,7 +3973,7 @@ struct TouchControlsOverlay: View {
             .onChange(of: m.visible) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: m.editing) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: library.blocksGameplayTouch) { _, _ in configureGamepad(landscape: landscape) }
-            .onDisappear { GamepadInput.shared.configureTouch(controls: []) }
+            .onDisappear { GamepadInput.shared.configureTouch(controls: []); TouchMouseGate.padOverlay = false }
         }
         .ignoresSafeArea()
     }
@@ -3606,9 +4001,13 @@ struct TouchControlsOverlay: View {
     }
 
     private func configureGamepad(landscape: Bool) {
-        let ids = landscape && m.visible && !m.editing && !library.blocksGameplayTouch
+        let ids = landscape && m.visible
             ? m.controls.filter { $0.action.padName.map(TouchPadAction.supported) ?? false }.map(\.id) : []
-        GamepadInput.shared.configureTouch(controls: Set(ids))
+        // Menus and the control editor keep the pad connected but take no input (#204);
+        // a touch that misses the controls is no mouse only while they do (#150).
+        let accepting = !m.editing && !library.blocksGameplayTouch
+        GamepadInput.shared.configureTouch(controls: Set(ids), acceptingInput: accepting)
+        TouchMouseGate.padOverlay = accepting && !ids.isEmpty
     }
 
     /// ml1970: with MADEIRA_CONTROLS_XBOX_DEFAULT=1, a user with no controls file gets the built-in controller
@@ -3652,6 +4051,8 @@ struct TouchControlsOverlay: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Done editing controls")
             } else {
+                // The iOS keyboard for the game, as ⌨ in the portrait key row.
+                glassButton("keyboard") { MetalBackedView.toggleKeyboard() }
                 glassButton("gamecontroller", dim: !m.visible) { m.visible.toggle() }
                 if Self.showsLayoutMenu(m) {
                     ControlLayoutMenu()
@@ -4102,6 +4503,9 @@ struct MappingPanel: View {
 
     private var keyboardTab: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if GamepadInput.keyboardMouseAvailable, !control.action.isPad, control.action != .none, control.action != .keyboardToggle {
+                bindingSection
+            }
             section("Pointer, sticks & special", [
                 ("L click", .mouseLeft), ("R click", .mouseRight),
                 ("WASD", .joystickWASD), ("Arrows", .joystickArrows),
@@ -4148,6 +4552,34 @@ struct MappingPanel: View {
             // XInput names, the chips and the buttons read Start/Select.
             section("System", [("Start", .pad("Menu")), ("Select", .pad("View")),
                                ("Guide", .pad("Guide"))])
+        }
+    }
+
+    /// Keyboard-and-mouse controller mode: which physical input performs this
+    /// control's action. A key stick binds to a stick; everything else to a
+    /// button or trigger. The chosen chip is highlighted; tapping it again clears.
+    private var bindingSection: some View {
+        let names = control.action.stickKeys != nil ? PadBindings.stickNames : PadBindings.buttonNames
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Controller button for this action (keyboard & mouse mode)")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.45))
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 48), spacing: 6)], spacing: 6) {
+                ForEach(names, id: \.self) { name in
+                    let on = control.padBinding == name
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        if let i = m.index(of: control.id) { m.controls[i].padBinding = on ? nil : name }
+                    } label: {
+                        Text(name == "Menu" ? "Start" : name == "View" ? "Select" : name)
+                            .font(.system(size: 12, weight: .medium)).lineLimit(1).minimumScaleFactor(0.55)
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity, minHeight: 30)
+                            .background(RoundedRectangle(cornerRadius: 7).fill(on ? Color.accentColor.opacity(0.6) : .white.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 

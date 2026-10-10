@@ -31,7 +31,7 @@ import ObjectiveC
 // keys extended, and the wineserver synthesises the generic VK_SHIFT/
 // VK_CONTROL/VK_MENU from the left/right ones. Posting VK_LSHIFT is therefore
 // both more precise than VK_SHIFT and fully compatible.
-// build/host-tests/check-hardware-input.py checks the combined HID -> VK ->
+// tests/host/check-hardware-input.py checks the combined HID -> VK ->
 // scan code result against Wine's US layout.
 //
 // FOCUS: GCKeyboard and GCMouse report to the app whatever the user is doing
@@ -2017,7 +2017,9 @@ final class PadStickMouse: ObservableObject {
     }
 
     @objc private func tick(_ l: CADisplayLink) {
-        guard let p = profile, HardwareInput.shared.baseFocused else { return }
+        // Keyboard-and-mouse controller mode (PadKeyboardMouse) owns the stick:
+        // moving the mouse here as well would double it.
+        guard let p = profile, HardwareInput.shared.baseFocused, !GamepadInput.shared.keyboardMouseOn else { return }
         let f = StickVelocity.frame(x: Double(p.rightThumbstick.xAxis.value),
                                     y: Double(p.rightThumbstick.yAxis.value),
                                     gain: InputSettings.shared.sensRel,

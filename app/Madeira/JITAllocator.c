@@ -1,4 +1,5 @@
 #include "JITAllocator.h"
+#include "../../build/madeira_cfg.h"   /* metal-validation (ml1249) */
 
 #include <mach/mach.h>
 #include <mach/vm_map.h>
@@ -14,6 +15,7 @@
 #include <errno.h>
 #include <mach-o/dyld.h>
 #include <os/log.h>
+#include <os/proc.h>
 
 // csops syscall - used to check CS_DEBUGGED flag
 #ifndef CS_DEBUGGED
@@ -369,10 +371,24 @@ void *jit_region_write(JITRegion *region, size_t offset, const void *code, size_
 
 // SIGTRAP handler: skips BRK instruction (PC += 4) and zeros x0.
 // This prevents crashes when BRK is executed without a debugger attached.
+// ml1233: only the JIT protocol's BRK #0xf00d (as Wine's handler does). Any other
+// trap is not ours -- a Swift runtime trap (precondition, force unwrap, overflow)
+// is BRK #1 -- and was skipped too, running on past it with x0 = 0. The handler
+// stays installed for the rest of the app run (from start-up without CS_DEBUGGED,
+// or from jit_arm_trap_fallback before a launch that then fails and keeps the app
+// up), so put the default action back and return: the instruction traps again and
+// the app crashes with a report.
 static void sigtrap_handler(int sig, siginfo_t *info, void *context) {
-    (void)sig;
     (void)info;
     ucontext_t *uc = (ucontext_t *)context;
+    uint64_t pc = uc->uc_mcontext->__ss.__pc;
+    if ((pc & 3) || *(const uint32_t *)(uintptr_t)pc != 0xd43e01a0u /* brk #0xf00d */) {
+        struct sigaction dfl;
+        memset(&dfl, 0, sizeof(dfl));
+        dfl.sa_handler = SIG_DFL;
+        sigaction(sig, &dfl, NULL);
+        return;
+    }
     uc->uc_mcontext->__ss.__pc += 4;
     uc->uc_mcontext->__ss.__x[0] = 0;
 }
@@ -391,6 +407,36 @@ void jit_install_trap_handler(void) {
     sa.sa_sigaction = sigtrap_handler;
     sigaction(SIGTRAP, &sa, NULL);
     jit_log("SIGTRAP handler installed (no debugger)");
+}
+
+void jit_arm_trap_fallback(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = sigtrap_handler;
+    sigaction(SIGTRAP, &sa, NULL);
+    jit_log("SIGTRAP handler installed (CS_DEBUGGED set, no debugger attached)");
+}
+
+bool jit_cs_status(uint32_t *flags) {
+    uint32_t value = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &value, sizeof(value)) != 0) return false;
+    *flags = value;
+    return true;
+}
+
+bool jit_task_map_range(uint64_t *min_address, uint64_t *max_address) {
+    task_vm_info_data_t vmi;
+    mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt) != KERN_SUCCESS ||
+        !vmi.max_address) return false;
+    *min_address = vmi.min_address;
+    *max_address = vmi.max_address;
+    return true;
+}
+
+uint64_t jit_available_memory(void) {
+    return (uint64_t)os_proc_available_memory();
 }
 
 // iOS 26 BRK-based JIT syscalls.
@@ -898,4 +944,22 @@ __attribute__((constructor(101), used)) static void madeira_early_va_claim(void)
             madeira_early_intruder_tag = info.user_tag; madeira_early_intruder_prot = (unsigned)info.protection;
         }
     }
+}
+
+/* ml1249: METAL API VALIDATION ON DEMAND.
+ *
+ * `metal-validation = 1` in Documents/madeira.cfg turns on Metal's own debug
+ * layer for this launch, reporting instead of aborting, and routes NSLog to
+ * stderr so the reports land in the Madeira log. It has to be in the
+ * environment before the first MTLDevice exists, and the app makes one for its
+ * CAMetalLayer long before madeira.cfg is otherwise read -- hence a
+ * constructor. Expensive: diagnostic runs only. */
+__attribute__((constructor(102), used)) static void madeira_metal_validation_opt_in(void)
+{
+    /* Metal API validation for this launch (debug layer, reports instead of aborts). */
+    if (!madeira_cfg_bool("metal-validation", 0)) return;
+    setenv("MTL_DEBUG_LAYER", "1", 1);
+    setenv("MTL_DEBUG_LAYER_ERROR_MODE", "nslog", 1);
+    setenv("MTL_DEBUG_LAYER_WARNING_MODE", "nslog", 1);
+    setenv("CFLOG_FORCE_STDERR", "1", 1);
 }
