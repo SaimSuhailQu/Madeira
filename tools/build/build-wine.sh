@@ -4,7 +4,8 @@ ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 8)}"
 WINE="$ROOT/wine"
 MINGW="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin"
-export PATH="$MINGW:$PATH"
+BISON="$ROOT/toolchains/bison-build/dist/bin"
+export PATH="$BISON:$MINGW:$PATH"
 
 [[ -x "$WINE/configure" ]] || { echo "ERROR: wine submodule is missing" >&2; exit 1; }
 
@@ -46,7 +47,7 @@ if [[ ! -f "$WINE/build-macos/Makefile" ]]; then
   mkdir -p "$WINE/build-macos"
   (
     cd "$WINE/build-macos"
-    ../configure --enable-archs=aarch64 --disable-tests
+    ../configure --enable-archs=aarch64 --disable-tests --without-freetype --without-x
   )
 fi
 
@@ -72,7 +73,7 @@ if [[ ! -f "$WINE/build-arm64ec/Makefile" ]]; then
   mkdir -p "$WINE/build-arm64ec"
   (
     cd "$WINE/build-arm64ec"
-    ../configure --enable-archs=arm64ec --disable-tests
+    ../configure --enable-archs=arm64ec --disable-tests --without-freetype --without-x
   )
 fi
 

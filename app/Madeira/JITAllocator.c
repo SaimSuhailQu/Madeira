@@ -369,6 +369,7 @@ void *jit_region_write(JITRegion *region, size_t offset, const void *code, size_
     return (char *)region->rx_ptr + offset;
 }
 
+#if defined(__arm64__) || defined(__aarch64__)
 // SIGTRAP handler: skips BRK instruction (PC += 4) and zeros x0.
 // This prevents crashes when BRK is executed without a debugger attached.
 // ml1233: only the JIT protocol's BRK #0xf00d (as Wine's handler does). Any other
@@ -392,8 +393,10 @@ static void sigtrap_handler(int sig, siginfo_t *info, void *context) {
     uc->uc_mcontext->__ss.__pc += 4;
     uc->uc_mcontext->__ss.__x[0] = 0;
 }
+#endif
 
 void jit_install_trap_handler(void) {
+#if defined(__arm64__) || defined(__aarch64__)
     // Only install if no debugger is attached.
     // When StikDebug is attached, it handles BRK/SIGTRAP directly.
     // Our handler would steal signals from the debugger and break the protocol.
@@ -407,15 +410,24 @@ void jit_install_trap_handler(void) {
     sa.sa_sigaction = sigtrap_handler;
     sigaction(SIGTRAP, &sa, NULL);
     jit_log("SIGTRAP handler installed (no debugger)");
+#else
+    // The iOS JIT protocol uses ARM64 BRK instructions and is unavailable on
+    // the x86_64 simulator slice. Do not intercept simulator SIGTRAPs.
+    jit_log("SIGTRAP handler unavailable on this architecture");
+#endif
 }
 
 void jit_arm_trap_fallback(void) {
+#if defined(__arm64__) || defined(__aarch64__)
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_flags = SA_SIGINFO;
     sa.sa_sigaction = sigtrap_handler;
     sigaction(SIGTRAP, &sa, NULL);
     jit_log("SIGTRAP handler installed (CS_DEBUGGED set, no debugger attached)");
+#else
+    jit_log("SIGTRAP fallback unavailable on this architecture");
+#endif
 }
 
 bool jit_cs_status(uint32_t *flags) {
@@ -447,6 +459,7 @@ uint64_t jit_available_memory(void) {
 
 __attribute__((noinline, optnone))
 void *jit26_prepare_region(void *addr, size_t len) {
+#if defined(__arm64__) || defined(__aarch64__)
     register void *x0 __asm__("x0") = addr;
     register size_t x1 __asm__("x1") = len;
     __asm__ volatile(
@@ -457,15 +470,22 @@ void *jit26_prepare_region(void *addr, size_t len) {
         : "x16", "memory"
     );
     return x0;
+#else
+    (void)addr;
+    (void)len;
+    return NULL;
+#endif
 }
 
 __attribute__((noinline, optnone))
 void jit26_detach(void) {
+#if defined(__arm64__) || defined(__aarch64__)
     __asm__ volatile(
         "mov x16, #0\n"
         "brk #0xf00d\n"
         ::: "x16", "memory"
     );
+#endif
 }
 
 bool jit_check_debugged(void) {

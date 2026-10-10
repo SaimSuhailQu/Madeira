@@ -1,70 +1,48 @@
-#!/usr/bin/env bash
-set -euo pipefail
-ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 8)}"
-SRC="$ROOT/toolchains/llvm-project"
-HOST="$ROOT/toolchains/llvm-host-build"
-IOS="$ROOT/toolchains/llvm-ios-build"
-TAG=llvmorg-15.0.7
+#!/bin/bash
+set -e
 
-mkdir -p "$ROOT/toolchains"
-if [[ ! -d "$SRC/.git" ]]; then
-  git clone --depth 1 --branch "$TAG" https://github.com/llvm/llvm-project.git "$SRC"
-fi
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$DIR"
 
-if compgen -G "$IOS/lib/libLLVM*.a" >/dev/null; then
-  echo "LLVM iOS: cached"
-  exit 0
-fi
+NINJA="/Library/Frameworks/Python.framework/Versions/3.14/bin/ninja"
 
-# Apple ld does not accept --gc-sections. Replace all occurrences of Darwin
-# checks to include iOS, ensure --gc-sections is never used on Apple platforms,
-# and disable dead stripping for the host toolchain (llvm-tblgen).
-python3 - "$SRC/llvm/cmake/modules/AddLLVM.cmake" <<'PY'
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-s = p.read_text()
-# Ensure both export symbol lists and dead stripping treat iOS like Darwin
-s = s.replace('MATCHES "Darwin"', 'MATCHES "Darwin|iOS"')
-# Ensure --gc-sections is never added when building on/for Apple platforms
-s = s.replace('LINK_FLAGS " -Wl,--gc-sections"', 'LINK_FLAGS ""')
-p.write_text(s)
-PY
+echo "Building passes and transforms for iOS arm64..."
+cd toolchains/llvm-ios-build
+$NINJA LLVMPasses LLVMTransformUtils LLVMScalarOpts LLVMInstCombine LLVMLinker LLVMAnalysis LLVMCore LLVMSupport LLVMBitReader LLVMBitWriter LLVMBinaryFormat
 
-if [[ ! -x "$HOST/bin/llvm-tblgen" ]]; then
-  cmake -S "$SRC/llvm" -B "$HOST" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_COMPILER="$(xcrun -find clang)" \
-    -DCMAKE_CXX_COMPILER="$(xcrun -find clang++)" \
-    -DLLVM_NO_DEAD_STRIP=ON \
-    -DLLVM_INCLUDE_TESTS=OFF \
-    -DLLVM_INCLUDE_EXAMPLES=OFF \
-    -DLLVM_INCLUDE_BENCHMARKS=OFF \
-    -DLLVM_ENABLE_TERMINFO=OFF \
-    -DLLVM_ENABLE_ZLIB=OFF
-  cmake --build "$HOST" --target llvm-tblgen --parallel "$JOBS"
-fi
+cd "$DIR"
 
-cmake -S "$SRC/llvm" -B "$IOS" -G Ninja \
-  -DCMAKE_SYSTEM_NAME=iOS \
-  -DCMAKE_OSX_SYSROOT=iphoneos \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DLLVM_TABLEGEN="$HOST/bin/llvm-tblgen" \
-  -DLLVM_BUILD_UTILS=OFF \
-  -DLLVM_BUILD_TOOLS=OFF \
-  -DLLVM_INCLUDE_TOOLS=OFF \
-  -DLLVM_INCLUDE_TESTS=OFF \
-  -DLLVM_INCLUDE_EXAMPLES=OFF \
-  -DLLVM_INCLUDE_BENCHMARKS=OFF \
-  -DLLVM_ENABLE_TERMINFO=OFF \
-  -DLLVM_ENABLE_ZLIB=OFF \
-  -DLLVM_TARGETS_TO_BUILD=""
+# Also check stub for dxmt_d3d9_unix_call_wow64_funcs
+cat << 'C_EOF' > /tmp/dxmt_stubs.c
+#include <stdint.h>
+const void *dxmt_d3d9_unix_call_wow64_funcs[] = { 0 };
+C_EOF
+xcrun --sdk iphoneos clang -target arm64-apple-ios15.0 -c /tmp/dxmt_stubs.c -o /tmp/dxmt_stubs.o
 
-cmake --build "$IOS" --parallel "$JOBS"
-compgen -G "$IOS/lib/libLLVM*.a" >/dev/null || {
-  echo "ERROR: LLVM iOS build produced no static LLVM libraries" >&2
-  exit 1
-}
+rm -rf /tmp/libdxmt_work
+mkdir -p /tmp/libdxmt_work
+cd /tmp/libdxmt_work
+
+echo "Extracting previous libdxmt_combined.a..."
+ar -x "$DIR/app/Madeira/libdxmt_combined.a"
+
+echo "Extracting newly built LLVM libs..."
+for lib in LLVMPasses LLVMTransformUtils LLVMScalarOpts LLVMInstCombine LLVMLinker; do
+    if [ -f "$DIR/toolchains/llvm-ios-build/lib/lib${lib}.a" ]; then
+        echo "Extracting lib${lib}.a"
+        mkdir -p "$lib"
+        cd "$lib"
+        ar -x "$DIR/toolchains/llvm-ios-build/lib/lib${lib}.a"
+        cd ..
+        cp "$lib"/*.o .
+    fi
+done
+
+cp /tmp/dxmt_stubs.o .
+
+echo "Recreating app/Madeira/libdxmt_combined.a..."
+libtool -static -o "$DIR/app/Madeira/libdxmt_combined.a" *.o
+
+cd "$DIR"
+rm -rf /tmp/libdxmt_work
+echo "Done updating libdxmt_combined.a!"

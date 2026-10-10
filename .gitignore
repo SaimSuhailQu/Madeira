@@ -165,3 +165,9 @@ app/Madeira/i386-windows/*
 # Madeira Dock: built from madeira-dock by build/madeira-dock/build.sh
 app/Madeira/arm64ec-windows/dockhost.exe
 app/Madeira/arm64ec-windows/dock-notices.txt
+app/DerivedData-cli/
+
+# Intermediate build objects
+build/crypto-unix/*.o
+build/dxmt-ios/*.o
+build/rppairing-ios/*.o

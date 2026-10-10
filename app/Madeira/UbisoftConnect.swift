@@ -148,14 +148,14 @@ struct UbisoftConnectSettingsSection: View {
 
             if ubi.isInstalled {
                 Button {
-                    let entry = ubi.registerInstalledLauncherEntry()
+                    _ = ubi.registerInstalledLauncherEntry()
                     notice = "Ubisoft Connect added to library. Start it from your Library screen."
                 } label: {
                     Label("Add Ubisoft Connect to Library", systemImage: "plus.circle")
                 }
             } else if ubi.isInstallerPresent {
                 Button {
-                    let entry = ubi.registerInstallerEntry()
+                    _ = ubi.registerInstallerEntry()
                     notice = "Installer added to library. Tap Play on 'Install Ubisoft Connect' to run setup."
                 } label: {
                     Label("Add Installer to Library", systemImage: "arrow.up.forward.app")

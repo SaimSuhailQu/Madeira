@@ -318,8 +318,11 @@ static void ios_sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
 
         // Redirect execution to ThreadStopHandler by modifying the signal context
         ucontext_t *uctx = static_cast<ucontext_t*>(ucontext);
-        // On ARM64 Darwin, PC is in __ss.__pc
+#if defined(__aarch64__) || defined(__arm64__)
         uctx->uc_mcontext->__ss.__pc = Thread->CurrentFrame->Pointers.ThreadStopHandlerSpillSRA;
+#elif defined(__x86_64__)
+        uctx->uc_mcontext->__ss.__rip = Thread->CurrentFrame->Pointers.ThreadStopHandlerSpillSRA;
+#endif
         return;
     }
 
@@ -681,8 +684,8 @@ int64_t fex_test_execute(void) {
     // On Linux this is done by LinuxEmulation/ThreadManager; on iOS we do it here.
     {
         constexpr size_t CALLRET_STACK_SIZE = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE; // 4MB
-        constexpr size_t PAGE_SIZE = 0x4000; // 16KB iOS pages
-        constexpr size_t ALLOC_SIZE = CALLRET_STACK_SIZE + 2 * PAGE_SIZE; // guard pages on both sides
+        constexpr size_t IOS_PAGE_SIZE = 0x4000; // 16KB iOS pages
+        constexpr size_t ALLOC_SIZE = CALLRET_STACK_SIZE + 2 * IOS_PAGE_SIZE; // guard pages on both sides
 
         void *callret_alloc = ::mmap(nullptr, ALLOC_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (callret_alloc == MAP_FAILED) {
@@ -695,7 +698,7 @@ int64_t fex_test_execute(void) {
         }
 
         // The usable area is between the two guard pages
-        void *callret_base = static_cast<uint8_t*>(callret_alloc) + PAGE_SIZE;
+        void *callret_base = static_cast<uint8_t*>(callret_alloc) + IOS_PAGE_SIZE;
         ::mprotect(callret_base, CALLRET_STACK_SIZE, PROT_READ | PROT_WRITE);
 
         Thread->CallRetStackBase = callret_base;
@@ -732,7 +735,7 @@ int64_t fex_test_execute(void) {
             (unsigned long long)Thread->CurrentFrame->State.rip,
             (unsigned long long)Thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RSP]);
     fex_log("InterruptFaultPage at %p (value=%d)",
-            &Thread->InterruptFaultPage, Thread->InterruptFaultPage);
+            &Thread->InterruptFaultPage, (int)Thread->InterruptFaultPage[0]);
     fex_log("SyscallHandlerObj=%p, SyscallHandlerFunc=%p",
             (void*)Thread->CurrentFrame->Pointers.SyscallHandlerObj,
             (void*)Thread->CurrentFrame->Pointers.SyscallHandlerFunc);

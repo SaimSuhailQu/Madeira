@@ -1707,12 +1707,14 @@ static void *wine_process_thread(void *arg) {
         // destructors on whatever's in the slot -> objc_release(TEB)
         // crash wedged the app after every net-test run. Clear it, same
         // as ntdll's pthread_exit_wrapper does for Wine worker threads.
+#if defined(__arm64__) || defined(__aarch64__)
         {
             uintptr_t tsd_base;
             __asm__ volatile("mrs %0, TPIDRRO_EL0" : "=r"(tsd_base));
             tsd_base &= ~7ULL;
             *(void **)(tsd_base + 275 * 8) = NULL;
         }
+#endif
     }
     return NULL;
 }
