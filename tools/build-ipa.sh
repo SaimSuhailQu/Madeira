@@ -30,17 +30,17 @@ git -C "$ROOT" submodule update --init --recursive
 log "Validating bundled Wine prefix"
 bash "$ROOT/tools/check-prefix-template.sh" "$ROOT/app/Madeira/prefix-template.tar.gz"
 
-"$ROOT/scripts/build/setup-llvm-mingw.sh"
-"$ROOT/scripts/build/build-wine.sh"
-"$ROOT/scripts/build/build-fex-ios.sh"
-"$ROOT/scripts/build/build-freetype-ios.sh"
+"$ROOT/tools/build/setup-llvm-mingw.sh"
+"$ROOT/tools/build/build-wine.sh"
+"$ROOT/tools/build/build-fex-ios.sh"
+"$ROOT/tools/build/build-freetype-ios.sh"
 
 log "Building FFmpeg for iOS"
 "$ROOT/build/ffmpeg/build.sh"
 
 log "Building GnuTLS stack for iOS"
 "$ROOT/build/gnutls-ios/build.sh"
-"$ROOT/scripts/build/sync-gnutls-libs.sh"
+"$ROOT/tools/build/sync-gnutls-libs.sh"
 
 log "Bootstrapping wineserver"
 "$ROOT/build/wineserver/bootstrap.sh"
@@ -50,20 +50,20 @@ log "Building Wine unix libraries"
 "$ROOT/build/ntdll-unix/build.sh"
 "$ROOT/build/win32u-unix/build.sh"
 
-"$ROOT/scripts/build/build-llvm-ios.sh"
-"$ROOT/scripts/build/build-shader-headers.sh"
-"$ROOT/scripts/build/build-dxmt-ios.sh"
+"$ROOT/tools/build/build-llvm-ios.sh"
+"$ROOT/tools/build/build-shader-headers.sh"
+"$ROOT/tools/build/build-dxmt-ios.sh"
 
 if [[ "${MADEIRA_BUILD_I386:-1}" == "1" ]]; then
   log "Building i386 (WoW64) PE set"
   "$ROOT/build/wine-i386/build.sh"
 fi
 
-"$ROOT/scripts/build/prepare-vcruntime.sh"
+"$ROOT/tools/build/prepare-vcruntime.sh"
 
 log "Staging bundled license texts"
 bash "$ROOT/build/stage-licenses.sh"
 
-"$ROOT/scripts/build/package-ipa.sh"
+"$ROOT/tools/build/package-ipa.sh"
 
 printf '\n\033[1;32mDone: %s/dist/Madeira.ipa\033[0m\n' "$ROOT"

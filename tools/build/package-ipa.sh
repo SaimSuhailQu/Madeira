@@ -3,7 +3,8 @@ set -euo pipefail
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DERIVED="$ROOT/app/DerivedData"
 DIST="$ROOT/dist"
-APP="$DERIVED/Build/Products/Release-iphoneos/Madeira.app"
+CONFIGURATION="${MADEIRA_CONFIGURATION:-Debug}"
+APP="$DERIVED/Build/Products/${CONFIGURATION}-iphoneos/Madeira.app"
 
 required=(
   "$ROOT/FEX/build-ios/FEXCore/Source/libFEXCore.a"
@@ -33,7 +34,7 @@ mkdir -p "$DIST"
 xcodebuild \
   -project "$ROOT/app/Madeira.xcodeproj" \
   -scheme Madeira \
-  -configuration Release \
+  -configuration "$CONFIGURATION" \
   -sdk iphoneos \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$DERIVED" \

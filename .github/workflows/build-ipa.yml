@@ -64,7 +64,7 @@ jobs:
         with:
           path: |
             ~/Library/Caches/Homebrew
-          key: ${{ runner.os }}-brew-${{ hashFiles('scripts/build-ipa.sh') }}
+          key: ${{ runner.os }}-brew-${{ hashFiles('tools/build-ipa.sh') }}
           restore-keys: |
             ${{ runner.os }}-brew-
 
@@ -86,7 +86,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: FEX/build-ios
-          key: ${{ runner.os }}-fex-ios-cxx20-v8-${{ hashFiles('FEX/**', 'scripts/build/build-fex-ios.sh', 'scripts/patch_fex_atomic_ref.sh') }}
+          key: ${{ runner.os }}-fex-ios-cxx20-v8-${{ hashFiles('FEX/**', 'tools/build/build-fex-ios.sh', 'tools/patch_fex_atomic_ref.sh') }}
           restore-keys: |
             ${{ runner.os }}-fex-ios-cxx20-v8-
 
@@ -109,7 +109,7 @@ jobs:
           path: |
             research/freetype
             build/freetype-ios/build
-          key: ${{ runner.os }}-freetype-ios-v1-${{ hashFiles('scripts/build/build-freetype-ios.sh', 'build/freetype-ios/build.sh') }}
+          key: ${{ runner.os }}-freetype-ios-v1-${{ hashFiles('tools/build/build-freetype-ios.sh', 'build/freetype-ios/build.sh') }}
           restore-keys: |
             ${{ runner.os }}-freetype-ios-v1-
 
@@ -119,7 +119,7 @@ jobs:
           path: |
             wine/build-macos
             wine/build-arm64ec
-          key: ${{ runner.os }}-wine-host-v5-${{ hashFiles('wine/**', 'scripts/build-ipa.sh', 'scripts/build/build-wine.sh') }}
+          key: ${{ runner.os }}-wine-host-v5-${{ hashFiles('wine/**', 'tools/build-ipa.sh', 'tools/build/build-wine.sh') }}
           restore-keys: |
             ${{ runner.os }}-wine-host-v5-
 
@@ -157,7 +157,7 @@ jobs:
 
       - name: Fix script permissions
         run: |
-          find scripts build -type f -name '*.sh' -exec chmod +x {} +
+          find tools build -type f -name '*.sh' -exec chmod +x {} +
 
       - name: Resolve the 32-bit (i386) build flag
         id: i386
@@ -172,7 +172,7 @@ jobs:
 
       - name: Run build-ipa.sh
         run: |
-          ./scripts/build-ipa.sh
+          ./tools/build-ipa.sh
 
       - name: Verify the 32-bit PE set was bundled
         if: steps.i386.outputs.value == '1'
