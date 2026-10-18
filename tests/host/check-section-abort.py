@@ -60,7 +60,13 @@ enter = function('void server_enter_uninterrupted_section( pthread_mutex_t *mute
 leave = function('void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )')
 
 # ------------------------------------------------------------------ static
-require(src.count('ios_defer_section_abort()') == 2, 'two deferral points: the EPIPE write and the EOF read')
+# ml1183 adds a third: wine_server_receive_fd's dead fd socket, read inside the
+# fd_cache_mutex section of server_get_unix_fd.
+require(src.count('ios_defer_section_abort()') == 3, 'three deferral points: the EPIPE write, the EOF read and the fd read')
+receive_fd = function('int wine_server_receive_fd( obj_handle_t *handle )')
+require('if (ios_defer_section_abort()) return -1;' in receive_fd
+        and receive_fd.index('ios_defer_section_abort()') < receive_fd.rindex('abort_thread(0)'),
+        'ml1183: a dead fd socket inside a section fails the read before abort_thread')
 require('if (ios_defer_section_abort()) return STATUS_THREAD_IS_TERMINATING;\n#endif\n        abort_thread(0);' in send_request,
         'send_request: EPIPE outside a section still exits at once')
 require('if (ios_defer_section_abort()) return FALSE;\n#endif\n    /* the server closed the connection; time to die... */\n    abort_thread(0);' in read_reply,
@@ -122,15 +128,24 @@ struct __server_request_info
 struct thread_data { int request_fd, reply_fd; };
 static __thread struct thread_data tdata;
 static struct thread_data *ntdll_get_thread_data(void) { return &tdata; }
-static void *NtCurrentTeb(void) { return &tdata; }
+struct fake_teb { struct { void *UniqueProcess, *UniqueThread; } ClientId; };
+static __thread struct fake_teb fteb;
+static struct fake_teb *NtCurrentTeb(void) { return &fteb; }
+#ifndef HandleToULong
+#define HandleToULong(h) ((unsigned long)(unsigned long long)(h))
+#endif
 static int fd_socket = -1;
 static unsigned int GetCurrentThreadId(void) { return 0x42; }
 static sigset_t server_block_set;
 static void mutex_lock( pthread_mutex_t *m ) { pthread_mutex_lock( m ); }
 static void mutex_unlock( pthread_mutex_t *m ) { pthread_mutex_unlock( m ); }
 static void ios_fdt_autopsy( const char *what, int fd, int ret, int err ) { (void)what; (void)fd; (void)ret; (void)err; }
+static void ios_bg_qos_check(void) {}   /* [bg-qos]: check-bg-qos.py */
 volatile int ios_srv_req_count;
 void ios_wineserver_wake(void) {}
+void ios_wineserver_ring( unsigned int tid ) { (void)tid; }
+volatile int g_madeira_srv_direct;      /* MADEIRA_SRV_DIRECT is off here: check-srv-direct.py */
+static BOOL ios_srv_try_direct( struct __server_request_info *req, unsigned int *status ) { (void)req; (void)status; return FALSE; }
 static DECLSPEC_NORETURN void server_protocol_perror( const char *err ) { perror( err ); abort(); }
 void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );
 void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );

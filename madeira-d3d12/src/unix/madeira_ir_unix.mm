@@ -19,6 +19,8 @@
 #include <mach-o/loader.h>   /* ml1990: LC_UUID of the converter dylib */
 #include "../../../build/madeira_cfg.h"   /* ml1095: one config file */
 #include <sys/stat.h>
+#include <dirent.h>
+#include <time.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
@@ -29,6 +31,7 @@
 
 #include "madeira_ir_abi.h"
 #include "madeira_dxil_cache.h"   /* ml1990 */
+#include "madeira_sc_pack.h"      /* madeira-bcd: madeira.cfg d3d12-shader-pack */
 
 #define IR_PRIVATE_IMPLEMENTATION 0   /* the canary owns the one definition */
 #include <metal_irconverter/metal_irconverter.h>
@@ -72,6 +75,14 @@
     X(IRShaderReflectionReleaseGeometryInfo) \
     X(IRErrorGetCode) \
     X(IRErrorDestroy)
+/* Optional. A converter without them still converts everything else; a DXIL
+ * hull/domain shader then reports no tessellation numbers and its pipeline
+ * stays a placeholder. */
+#define IR_OPT_FUNC_LIST(X) \
+    X(IRShaderReflectionCopyHullInfo) \
+    X(IRShaderReflectionReleaseHullInfo) \
+    X(IRShaderReflectionCopyDomainInfo) \
+    X(IRShaderReflectionReleaseDomainInfo)
 
 struct IRFns {
     void *handle;
@@ -81,6 +92,7 @@ struct IRFns {
     int      ident_ok;     /* ml1990: ident includes the dylib's LC_UUID */
 #define IR_DECL(n) decltype(&::n) n;
     IR_FUNC_LIST(IR_DECL)
+    IR_OPT_FUNC_LIST(IR_DECL)
 #undef IR_DECL
 };
 static IRFns g_ir;
@@ -132,6 +144,9 @@ bind:
     }
     IR_FUNC_LIST(IR_BIND)
 #undef IR_BIND
+#define IR_BIND_OPT(n) g_ir.n = (decltype(&::n))dlsym(g_ir.handle, #n);
+    IR_OPT_FUNC_LIST(IR_BIND_OPT)
+#undef IR_BIND_OPT
 
     /* ml1990: a different converter is a different compiler, and every DXIL
      * cache entry it did not produce must miss. The header version says which
@@ -349,14 +364,82 @@ static void mad_sc_hash_add(uint64_t *h, const void *p, size_t n)
     for (size_t i = 0; i < n; i++) { *h ^= b[i]; *h *= 1099511628211ull; }
 }
 
+/* The build every cache entry (DXBC and DXIL) is bound to. A rebuild of this
+ * archive used to change __DATE__/__TIME__ and so start the device's cache from
+ * nothing: Ghost of Tsushima then converted its ~29,000 stages again behind
+ * "Compiling shaders" after every update. build/dxmt-ios/build.sh passes
+ * MADEIRA_IR_CONVERTER_ID, a hash of everything that shapes a conversion (this
+ * service and the IR ABI, the build script's flags, DXMT's airconv and DXBC
+ * parser, LLVM's configuration, the converter's headers and library); a build
+ * that changes none of them keeps the cache. Without it, every build gets a
+ * cache of its own, as before. */
+#ifdef MADEIRA_IR_CONVERTER_ID
+#define MAD_SC_BUILD "converter " MADEIRA_IR_CONVERTER_ID
+#else
+#define MAD_SC_BUILD __DATE__ " " __TIME__
+#endif
+
+/* Entries of an earlier build are never read again, and the DXBC ones (unlike
+ * the size-bounded DXIL ones) were never deleted either. The first cache access
+ * of a process compares shadercache/.mdsc-build with MAD_SC_BUILD; when it
+ * differs, a background thread removes the .mdsc entries (and torn .tmp files)
+ * written before the process started, then records the build. */
+static time_t g_sc_prune_before;
+static void *mad_sc_prune_thread(void *arg)
+{
+    char *dir = (char *)arg, path[1400];
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    struct stat st;
+    unsigned n = 0;
+    if (d) {
+        while ((e = readdir(d))) {
+            size_t l = strlen(e->d_name);
+            if (!((l > 5 && !strcmp(e->d_name + l - 5, ".mdsc")) || strstr(e->d_name, ".mdsc.tmp"))) continue;
+            if (snprintf(path, sizeof path, "%s/%s", dir, e->d_name) >= (int)sizeof path) continue;
+            if (stat(path, &st) || st.st_mtime >= g_sc_prune_before) continue;   /* this build's own */
+            if (!unlink(path)) n++;
+        }
+        closedir(d);
+        if (snprintf(path, sizeof path, "%s/.mdsc-build", dir) < (int)sizeof path) {
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) { ssize_t w = write(fd, MAD_SC_BUILD, strlen(MAD_SC_BUILD)); (void)w; close(fd); }
+        }
+    }
+    if (n) dprintf(2, "[madeira-ir] DXBC shader cache: removed %u entries of earlier builds\n", n);
+    free(dir);
+    return NULL;
+}
+static void mad_sc_prune_start(void)
+{
+    const char *docs = getenv("MADEIRA_DOCS_DIR");
+    char dir[1100], marker[1200], old[128];
+    ssize_t n = -1;
+    int fd;
+    pthread_t t;
+    if (!docs || !*docs) return;
+    if (snprintf(dir, sizeof dir, "%s/shadercache", docs) >= (int)sizeof dir) return;
+    if (snprintf(marker, sizeof marker, "%s/.mdsc-build", dir) >= (int)sizeof marker) return;
+    fd = open(marker, O_RDONLY);
+    if (fd >= 0) { n = read(fd, old, sizeof old - 1); close(fd); }
+    old[n > 0 ? n : 0] = 0;
+    if (!strcmp(old, MAD_SC_BUILD)) return;
+    g_sc_prune_before = time(NULL) - 2;
+    char *arg = strdup(dir);
+    if (arg && !pthread_create(&t, NULL, mad_sc_prune_thread, arg)) pthread_detach(t);
+    else free(arg);
+}
+
 /* Returns 0 if the cache directory is unavailable. ml1990: the DXIL cache
  * shares the directory under its own extension. */
 static int mad_sc_path_ext(uint64_t key, const char *ext, char *out, size_t cap)
 {
+    static pthread_once_t prune_once = PTHREAD_ONCE_INIT;
     const char *docs = getenv( "MADEIRA_DOCS_DIR" );
     if (!docs || !*docs) return 0;
     if (snprintf(out, cap, "%s/shadercache", docs) >= (int)cap) return 0;
     mkdir(out, 0755);   /* harmless if it exists */
+    pthread_once(&prune_once, mad_sc_prune_start);
     if (snprintf(out, cap, "%s/shadercache/%016llx.%s", docs,
                  (unsigned long long)key, ext) >= (int)cap) return 0;
     return 1;
@@ -366,12 +449,151 @@ static int mad_sc_path(uint64_t key, char *out, size_t cap)
     return mad_sc_path_ext(key, "mdsc", out, cap);
 }
 
+/* ---------------------------------------------------------------------------
+ * madeira-bcd: the packed shader cache (madeira_sc_pack.c).
+ *
+ * One file per converted shader left 11,095 files in shadercache after two
+ * Red Dead Redemption 2 runs. madeira.cfg (or the game's own file)
+ * d3d12-shader-pack = 1 keeps the entries in one append-only file per kind
+ * instead, shadercache/pack/dxbc.mdpk and dxil.mdpk, each entry the same bytes
+ * its loose file would hold. OFF by default: then mad_sc_pack_dxbc() and
+ * mad_dxc_pack() return NULL, nothing below runs, and the loose files are
+ * written, named and pruned exactly as before.
+ *
+ * With it on, a key the pack does not have is still looked up as a loose file
+ * of an earlier run; a hit there is appended to the pack and the loose file
+ * deleted, so the directory drains as the game asks for its shaders again.
+ * There is no bulk import: the switch can be set for one game only, and
+ * moving another game's loose entries into the pack would take them away from
+ * that game. New conversions go to the pack only. Bounds: the DXIL pack has
+ * the DXIL cache's (MADEIRA_D3D12_DXIL_CACHE_MB), the DXBC pack
+ * MAD_SC_PACK_DXBC_CAP; an append past its bound drops that pack's entries
+ * and starts a new generation (madeira_sc_pack.c, SIZE BOUND).
+ * ------------------------------------------------------------------------- */
+#define MAD_SC_PACK_DXBC_CAP (2048ull << 20)   /* the loose DXBC entries never had a bound */
+static pthread_once_t g_sc_pack_once = PTHREAD_ONCE_INIT;
+static int g_sc_pack_on;
+static void mad_sc_pack_once(void)
+{
+    g_sc_pack_on = madeira_cfg_bool("d3d12-shader-pack", 0);   /* 1: packed shader cache; 0 (default): one file per shader */
+    if (g_sc_pack_on)
+        fprintf(stderr, "[madeira-ir] packed shader cache ON (madeira.cfg d3d12-shader-pack): "
+                        "shadercache/pack/dxbc.mdpk and dxil.mdpk\n");
+}
+static int mad_sc_pack_on(void)
+{
+    pthread_once(&g_sc_pack_once, mad_sc_pack_once);
+    return g_sc_pack_on;
+}
+/* NULL when the pack cannot be used; the loose files then stay in use. */
+static struct mad_pack *mad_sc_pack_open(const char *name, uint32_t kind, uint64_t cap)
+{
+    const char *docs = getenv("MADEIRA_DOCS_DIR");
+    char dir[1100];
+    if (!docs || !*docs || snprintf(dir, sizeof dir, "%s/shadercache", docs) >= (int)sizeof dir) return NULL;
+    mkdir(dir, 0755);   /* harmless if it exists */
+    if (snprintf(dir, sizeof dir, "%s/shadercache/pack", docs) >= (int)sizeof dir) return NULL;
+    return mad_pack_open(dir, name, kind, MAD_SC_BUILD, cap);
+}
+static struct mad_pack *g_sc_pack_dxbc;
+static pthread_once_t g_sc_pack_dxbc_once = PTHREAD_ONCE_INIT;
+static void mad_sc_pack_dxbc_once(void)
+{
+    g_sc_pack_dxbc = mad_sc_pack_open("dxbc", MAD_PACK_KIND_DXBC, MAD_SC_PACK_DXBC_CAP);
+}
+static struct mad_pack *mad_sc_pack_dxbc(void)
+{
+    if (!mad_sc_pack_on()) return NULL;
+    pthread_once(&g_sc_pack_dxbc_once, mad_sc_pack_dxbc_once);
+    return g_sc_pack_dxbc;
+}
+
+/* The reflection a DXBC entry carries, handed back as a fresh compile leaves
+ * it. Shared by the loose and the packed reader. */
+static void mad_sc_deliver(struct madeira_ir_convert_args *a, const struct mad_sc_header *h)
+{
+    a->ret_air_nranges2 = h->nranges2; a->ret_cb_table_bind2 = h->cb_bind2;   /* ml1083 */
+    a->ret_arg_table_bind2 = h->arg_bind2; a->ret_arg_qwords2 = h->arg_qwords2;
+    a->ret_threads_per_patch = h->threads_per_patch; a->ret_tess_out_prim = h->tess_out_prim;
+    a->ret_max_potential_factor = h->max_potential;
+
+    a->ret_backend        = h->backend;
+    a->ret_cb_table_bind  = h->cb_bind;
+    a->ret_arg_table_bind = h->arg_bind;
+    a->ret_arg_qwords     = h->arg_qwords;
+    a->ret_air_nranges    = h->nranges;
+    a->ret_air_slot_mask  = h->slot_mask;
+    a->ret_vs_input_count = h->vs_input_count;
+    a->ret_tg_size[0] = h->tg[0]; a->ret_tg_size[1] = h->tg[1]; a->ret_tg_size[2] = h->tg[2];
+    if (a->out_entry) snprintf((char *)(uintptr_t)a->out_entry, MADEIRA_IR_ENTRY_MAX, "%s", h->entry);
+    a->ret_status = MADEIRA_IR_OK;
+}
+
+/* madeira-bcd: 1 if `b` holds a whole DXBC entry as mad_sc_store writes it. */
+static int mad_sc_entry_ok(const unsigned char *b, size_t len)
+{
+    struct mad_sc_header h;
+    if (len < sizeof h) return 0;
+    memcpy(&h, b, sizeof h);
+    return h.magic == MAD_SC_MAGIC && h.version == MAD_SC_VERSION &&
+           h.nranges <= MADEIRA_IR_AIR_RANGE_MAX && h.metallib_len && h.metallib_len <= len &&
+           (uint64_t)sizeof h + ((uint64_t)h.nranges + h.nranges2) * sizeof(struct madeira_ir_air_range) +
+               h.metallib_len <= (uint64_t)len;
+}
+
+/* madeira-bcd: mad_sc_load's reading, from an entry in memory (a packed one,
+ * or a loose one being moved into the pack). Returns 0, 1 or 2 as
+ * mad_sc_load does, with the same sizing-call answer before any range check. */
+static int mad_sc_load_mem(const unsigned char *b, size_t len, struct madeira_ir_convert_args *a,
+                           struct madeira_ir_air_range *out_ranges)
+{
+    struct mad_sc_header h;
+    struct madeira_ir_air_range *out2 = (struct madeira_ir_air_range *)(uintptr_t)a->out_air_ranges2;
+    size_t n1, n2;
+    if (!mad_sc_entry_ok(b, len)) return 0;
+    memcpy(&h, b, sizeof h);
+    n1 = (size_t)h.nranges * sizeof *out_ranges;
+    n2 = (size_t)h.nranges2 * sizeof *out2;
+    a->ret_len = h.metallib_len;
+    if (!a->out_buf || a->out_cap < h.metallib_len) { a->ret_status = MADEIRA_IR_BUFFER_TOO_SMALL; return 2; }
+    if (h.nranges && (!out_ranges || h.nranges > a->air_range_cap)) return 0;
+    if (h.nranges2 && (!out2 || h.nranges2 > a->air_range_cap2)) return 0;   /* ml1083 */
+    if (n1) memcpy(out_ranges, b + sizeof h, n1);
+    if (n2) memcpy(out2, b + sizeof h + n1, n2);
+    memcpy((void *)(uintptr_t)a->out_buf, b + sizeof h + n1 + n2, (size_t)h.metallib_len);
+    mad_sc_deliver(a, &h);
+    return 1;
+}
+
+/* madeira-bcd: a DXBC entry from the pack. On a miss the loose entry of an
+ * earlier run, if there is one, moves into the pack and is served from there;
+ * a damaged loose entry is deleted, as the loose path would replace it. */
+static int mad_sc_load_packed(struct mad_pack *pack, uint64_t key, struct madeira_ir_convert_args *a,
+                              struct madeira_ir_air_range *out_ranges)
+{
+    char path[1200];
+    void *blob = NULL;
+    size_t len = 0;
+    int r;
+    if (!mad_pack_get(pack, key, &blob, &len)) {
+        if (!mad_sc_path(key, path, sizeof path) ||
+            !mad_pack_read_file(path, MAD_PACK_MAX_PAYLOAD, &blob, &len)) return 0;
+        if (!mad_sc_entry_ok((const unsigned char *)blob, len)) { free(blob); unlink(path); return 0; }
+        mad_pack_adopt(pack, key, blob, len, path);
+    }
+    r = mad_sc_load_mem((const unsigned char *)blob, len, a, out_ranges);
+    free(blob);
+    return r;
+}
+
 static int mad_sc_load(uint64_t key, struct madeira_ir_convert_args *a,
                        struct madeira_ir_air_range *out_ranges)
 {
     char path[1200];
     struct mad_sc_header h;
     int fd;
+    struct mad_pack *pack = mad_sc_pack_dxbc();   /* madeira-bcd: NULL unless d3d12-shader-pack */
+    if (pack) return mad_sc_load_packed(pack, key, a, out_ranges);
     if (!mad_sc_path(key, path, sizeof path)) return 0;
     fd = open(path, O_RDONLY);
     if (fd < 0) return 0;
@@ -397,22 +619,51 @@ static int mad_sc_load(uint64_t key, struct madeira_ir_convert_args *a,
     }
     if (read(fd, (void *)(uintptr_t)a->out_buf, (size_t)h.metallib_len) != (ssize_t)h.metallib_len) { close(fd); return 0; }
     close(fd);
-    a->ret_air_nranges2 = h.nranges2; a->ret_cb_table_bind2 = h.cb_bind2;   /* ml1083 */
-    a->ret_arg_table_bind2 = h.arg_bind2; a->ret_arg_qwords2 = h.arg_qwords2;
-    a->ret_threads_per_patch = h.threads_per_patch; a->ret_tess_out_prim = h.tess_out_prim;
-    a->ret_max_potential_factor = h.max_potential;
-
-    a->ret_backend        = h.backend;
-    a->ret_cb_table_bind  = h.cb_bind;
-    a->ret_arg_table_bind = h.arg_bind;
-    a->ret_arg_qwords     = h.arg_qwords;
-    a->ret_air_nranges    = h.nranges;
-    a->ret_air_slot_mask  = h.slot_mask;
-    a->ret_vs_input_count = h.vs_input_count;
-    a->ret_tg_size[0] = h.tg[0]; a->ret_tg_size[1] = h.tg[1]; a->ret_tg_size[2] = h.tg[2];
-    if (a->out_entry) snprintf((char *)(uintptr_t)a->out_entry, MADEIRA_IR_ENTRY_MAX, "%s", h.entry);
-    a->ret_status = MADEIRA_IR_OK;
+    mad_sc_deliver(a, &h);
     return 1;
+}
+
+/* The header of the DXBC entry for this conversion. Shared by the loose and
+ * the packed writer. */
+static void mad_sc_header_fill(struct mad_sc_header *h, const struct madeira_ir_convert_args *a,
+                               const char *entry, uint64_t len)
+{
+    memset(h, 0, sizeof *h);
+    h->magic = MAD_SC_MAGIC; h->version = MAD_SC_VERSION;
+    h->backend = a->ret_backend; h->cb_bind = a->ret_cb_table_bind;
+    h->arg_bind = a->ret_arg_table_bind; h->arg_qwords = a->ret_arg_qwords;
+    h->nranges = a->ret_air_nranges > MADEIRA_IR_AIR_RANGE_MAX ? 0 : a->ret_air_nranges;
+    h->slot_mask = a->ret_air_slot_mask; h->vs_input_count = a->ret_vs_input_count;
+    h->tg[0] = a->ret_tg_size[0]; h->tg[1] = a->ret_tg_size[1]; h->tg[2] = a->ret_tg_size[2];
+    h->metallib_len = len;
+    snprintf(h->entry, sizeof h->entry, "%s", entry ? entry : "");
+    h->nranges2 = a->ret_air_nranges2 > MADEIRA_IR_AIR_RANGE_MAX ? 0 : a->ret_air_nranges2;   /* ml1083 */
+    h->cb_bind2 = a->ret_cb_table_bind2; h->arg_bind2 = a->ret_arg_table_bind2; h->arg_qwords2 = a->ret_arg_qwords2;
+    h->threads_per_patch = a->ret_threads_per_patch; h->tess_out_prim = a->ret_tess_out_prim;
+    h->max_potential = a->ret_max_potential_factor;
+}
+
+/* madeira-bcd: the bytes mad_sc_store would write to the loose file -- header,
+ * range lists, metallib -- appended to the pack as one record. */
+static void mad_sc_store_packed(struct mad_pack *pack, uint64_t key, const struct madeira_ir_convert_args *a,
+                                const struct madeira_ir_air_range *ranges, const char *entry,
+                                const void *data, uint64_t len)
+{
+    struct mad_sc_header h;
+    size_t n1, n2, total;
+    unsigned char *b;
+    if (len > MAD_PACK_MAX_PAYLOAD) return;
+    mad_sc_header_fill(&h, a, entry, len);
+    n1 = h.nranges && ranges ? (size_t)h.nranges * sizeof *ranges : 0;
+    n2 = h.nranges2 && a->out_air_ranges2 ? (size_t)h.nranges2 * sizeof *ranges : 0;   /* ml1083 */
+    total = sizeof h + n1 + n2 + (size_t)len;
+    if (!(b = (unsigned char *)malloc(total))) return;
+    memcpy(b, &h, sizeof h);
+    if (n1) memcpy(b + sizeof h, ranges, n1);
+    if (n2) memcpy(b + sizeof h + n1, (const void *)(uintptr_t)a->out_air_ranges2, n2);
+    memcpy(b + sizeof h + n1 + n2, data, (size_t)len);
+    mad_pack_put(pack, key, b, total);
+    free(b);
 }
 
 /* ml1085: takes the compiled bytes directly, so the SIZING call can store the
@@ -427,6 +678,7 @@ static void mad_sc_store(uint64_t key, const struct madeira_ir_convert_args *a,
     char path[1200], tmp[1264];
     struct mad_sc_header h;
     int fd;
+    struct mad_pack *pack;
     if (!len || !data) return;
     /* ml1146: a conversion whose caller asked for no range list (a vertex stage
      * converted for a geometry pipeline) still COUNTS its ranges. Stored like
@@ -435,6 +687,10 @@ static void mad_sc_store(uint64_t key, const struct madeira_ir_convert_args *a,
      * registers and spaces, and 4,766 draws skipped as "table not reported"
      * (ph-valley03). An entry is only stored when every list it counts is here. */
     if ((a->ret_air_nranges && !ranges) || (a->ret_air_nranges2 && !a->out_air_ranges2)) return;
+    if ((pack = mad_sc_pack_dxbc())) {   /* madeira-bcd: NULL unless d3d12-shader-pack */
+        mad_sc_store_packed(pack, key, a, ranges, entry, data, len);
+        return;
+    }
     if (!mad_sc_path(key, path, sizeof path)) return;
     /* Write-then-rename so a crash mid-write can never leave a torn entry that
      * a later run would trust. */
@@ -442,19 +698,7 @@ static void mad_sc_store(uint64_t key, const struct madeira_ir_convert_args *a,
     fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return;
 
-    memset(&h, 0, sizeof h);
-    h.magic = MAD_SC_MAGIC; h.version = MAD_SC_VERSION;
-    h.backend = a->ret_backend; h.cb_bind = a->ret_cb_table_bind;
-    h.arg_bind = a->ret_arg_table_bind; h.arg_qwords = a->ret_arg_qwords;
-    h.nranges = a->ret_air_nranges > MADEIRA_IR_AIR_RANGE_MAX ? 0 : a->ret_air_nranges;
-    h.slot_mask = a->ret_air_slot_mask; h.vs_input_count = a->ret_vs_input_count;
-    h.tg[0] = a->ret_tg_size[0]; h.tg[1] = a->ret_tg_size[1]; h.tg[2] = a->ret_tg_size[2];
-    h.metallib_len = len;
-    snprintf(h.entry, sizeof h.entry, "%s", entry ? entry : "");
-    h.nranges2 = a->ret_air_nranges2 > MADEIRA_IR_AIR_RANGE_MAX ? 0 : a->ret_air_nranges2;   /* ml1083 */
-    h.cb_bind2 = a->ret_cb_table_bind2; h.arg_bind2 = a->ret_arg_table_bind2; h.arg_qwords2 = a->ret_arg_qwords2;
-    h.threads_per_patch = a->ret_threads_per_patch; h.tess_out_prim = a->ret_tess_out_prim;
-    h.max_potential = a->ret_max_potential_factor;
+    mad_sc_header_fill(&h, a, entry, len);
 
     int ok = write(fd, &h, sizeof h) == (ssize_t)sizeof h;
     if (ok && h.nranges && ranges) {
@@ -513,9 +757,37 @@ static int mad_vsps_fill_enabled(void)
     return cached;
 }
 
+/* madeira-bcd: madeira.cfg (or the game's own file) dxbc-register-spaces = 1
+ * lets SM 5.1 declarations in a register space other than 0 through. The
+ * compiler keys its tables by the declaration's range id, never by register or
+ * space, and the runtime resolves every range by (type, space, register)
+ * against the root signature (madeira_d3d12.c, mad_air_resolve), so nothing
+ * lands on space 0's register. Off by default: those shaders are refused as
+ * before. Horizon Zero Dawn declares b0 in spaces 6 and 8 and s0/t16 in space 8.
+ * With it on, the cache keys of the tessellation and geometry paths (which look
+ * up before the range check) carry it, so turning it off refuses again. */
+static int mad_dxbc_spaces(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        cached = madeira_cfg_bool("dxbc-register-spaces", 0) ? 1 : 0;
+        if (cached)
+            fprintf(stderr, "[madeira-ir] DXBC register spaces other than 0 are mapped "
+                            "(madeira.cfg dxbc-register-spaces)\n");
+    }
+    return cached;
+}
+static void mad_sc_hash_spaces(uint64_t *key)
+{
+    static const char tag[] = "dxbc-register-spaces";
+    if (mad_dxbc_spaces()) mad_sc_hash_add(key, tag, sizeof tag);
+}
+
 /* ml1083: one shader's declaration ranges, in the runtime's record format, with
  * the same refusals mad_airconv_convert has always applied (singletons in
- * register space 0 only). Returns a madeira_ir_status. */
+ * register space 0 only; other spaces with dxbc-register-spaces). Returns a
+ * madeira_ir_status. */
 static int mad_air_ranges(sm50_shader_t shader, struct madeira_ir_air_range *out, uint32_t cap,
                           uint32_t *n_out, char *note, size_t note_cap)
 {
@@ -535,8 +807,9 @@ static int mad_air_ranges(sm50_shader_t shader, struct madeira_ir_air_range *out
                      c, ranges[i].LowerBound, ranges[i].RegisterSpace, ranges[i].RangeSize);
             return MADEIRA_IR_UNSUPPORTED_RANGE;
         }
-        if (ranges[i].RegisterSpace != 0) {
-            snprintf(note, note_cap, "%s%u is in register space %u (only space 0 is mapped)",
+        if (ranges[i].RegisterSpace != 0 && !mad_dxbc_spaces()) {
+            snprintf(note, note_cap, "%s%u is in register space %u (only space 0 is mapped; "
+                     "dxbc-register-spaces = 1 maps the others)",
                      c, ranges[i].LowerBound, ranges[i].RegisterSpace);
             return MADEIRA_IR_UNSUPPORTED_RANGE;
         }
@@ -620,7 +893,7 @@ static int mad_airconv_convert_tess(struct madeira_ir_convert_args *a,
     {   /* cache identity: every input that shapes the output */
         uint64_t key = 1469598103934665603ull;
         uint32_t mv = SM50_SHADER_METAL_320, ver = MAD_SC_VERSION, st[2] = { a->tess_stage, a->tess_index_format };
-        const char *stamp = __DATE__ __TIME__;
+        const char *stamp = MAD_SC_BUILD;
         mad_sc_hash_add(&key, "tess", 4);
         mad_sc_hash_add(&key, bc, bclen);
         mad_sc_hash_add(&key, hs, hslen);
@@ -630,6 +903,7 @@ static int mad_airconv_convert_tess(struct madeira_ir_convert_args *a,
         mad_sc_hash_add(&key, &ver, sizeof ver);
         mad_sc_hash_add(&key, stamp, strlen(stamp));
         if (ia_nel) mad_sc_hash_add(&key, ia_el, (size_t)ia_nel * sizeof ia_el[0]);
+        mad_sc_hash_spaces(&key);   /* madeira-bcd: dxbc-register-spaces */
         sc_key = key;
         int hit = mad_sc_load(key, a, out_ranges);
         if (hit) { a->ret_air_slot_mask = slot_mask; a->ret_vs_input_count = ia_nel; return (int)a->ret_status; }
@@ -797,7 +1071,7 @@ static int mad_airconv_convert_gs(struct madeira_ir_convert_args *a,
     {   /* cache identity: every input that shapes the output */
         uint64_t key = 1469598103934665603ull;
         uint32_t mv = SM50_SHADER_METAL_320, ver = MAD_SC_VERSION, st[3] = { a->gs_stage, a->tess_index_format, a->gs_strip ? 1u : 0u };
-        const char *stamp = __DATE__ __TIME__;
+        const char *stamp = MAD_SC_BUILD;
         mad_sc_hash_add(&key, "geom", 4);
         mad_sc_hash_add(&key, bc, bclen);
         mad_sc_hash_add(&key, other, olen);
@@ -806,6 +1080,7 @@ static int mad_airconv_convert_gs(struct madeira_ir_convert_args *a,
         mad_sc_hash_add(&key, &ver, sizeof ver);
         mad_sc_hash_add(&key, stamp, strlen(stamp));
         if (ia_nel) mad_sc_hash_add(&key, ia_el, (size_t)ia_nel * sizeof ia_el[0]);
+        mad_sc_hash_spaces(&key);   /* madeira-bcd: dxbc-register-spaces */
         sc_key = key;
         int hit = mad_sc_load(key, a, out_ranges);
         if (hit) { a->ret_air_slot_mask = slot_mask; a->ret_vs_input_count = ia_nel; return (int)a->ret_status; }
@@ -922,8 +1197,8 @@ static int mad_airconv_convert(struct madeira_ir_convert_args *a,
     /* Refuse what the compiler would silently get wrong. Its resource-lookup
      * callbacks take the dynamic index and discard it ("ignore index in
      * SM 5.0"), so a multi-element or unbounded range collapses to its first
-     * descriptor -- wrong data, no diagnostic. A register space we do not map
-     * would likewise bind whatever sits at the same register in space 0.
+     * descriptor -- wrong data, no diagnostic. A register space other than 0
+     * is refused too unless dxbc-register-spaces is on (mad_dxbc_spaces).
      * Named refusal, never a silent collapse. */
     for (uint32_t i = 0; i < n; i++) {
         static const char *cls[4] = { "b", "s", "t", "u" };
@@ -936,9 +1211,10 @@ static int mad_airconv_convert(struct madeira_ir_convert_args *a,
             status = MADEIRA_IR_UNSUPPORTED_RANGE;
             goto done;
         }
-        if (ranges[i].RegisterSpace != 0) {
+        if (ranges[i].RegisterSpace != 0 && !mad_dxbc_spaces()) {
             snprintf(a->ret_note, sizeof a->ret_note,
-                     "%s%u is in register space %u (only space 0 is mapped)",
+                     "%s%u is in register space %u (only space 0 is mapped; "
+                     "dxbc-register-spaces = 1 maps the others)",
                      c, ranges[i].LowerBound, ranges[i].RegisterSpace);
             status = MADEIRA_IR_UNSUPPORTED_RANGE;
             goto done;
@@ -1060,9 +1336,9 @@ static int mad_airconv_convert(struct madeira_ir_convert_args *a,
             /* ml1020: bind the key to THIS BUILD. A cache entry produced by an
              * older compiler is not safe to reuse -- the airconv changes in this
              * session alone would have invalidated it -- and a silently stale
-             * shader is far worse than recompiling. Rebuilding the archive
-             * changes this stamp and orphans the old entries. */
-            { const char *stamp = __DATE__ __TIME__;
+             * shader is far worse than recompiling. A build with another
+             * converter identity (MAD_SC_BUILD) orphans the old entries. */
+            { const char *stamp = MAD_SC_BUILD;
               mad_sc_hash_add(&key, stamp, strlen(stamp)); }
             if (ia_nel) mad_sc_hash_add(&key, ia_el, (size_t)ia_nel * sizeof ia_el[0]);
             /* ml1031: the emitted pixel shader now depends on WHICH vertex stage
@@ -1079,6 +1355,7 @@ static int mad_airconv_convert(struct madeira_ir_convert_args *a,
                 uint32_t pv[4] = { a->ps_sample_mask, a->ps_flags, a->ps_unorm_output_mask, 1u };
                 mad_sc_hash_add(&key, pv, sizeof pv);
             }
+            mad_sc_hash_spaces(&key);   /* madeira-bcd: dxbc-register-spaces */
             sc_key = key;
 
             int hit = mad_sc_load(key, a, out_ranges);
@@ -1207,10 +1484,45 @@ static void mad_dxc_count(int hit)
         dprintf(2, "[d3d12-dxil-cache] ml1990 hits=%u misses=%u\n", h, m);
 }
 
+/* madeira-bcd: the DXIL entries' pack (d3d12-shader-pack, see mad_sc_pack_on),
+ * bounded by the DXIL cache's own MADEIRA_D3D12_DXIL_CACHE_MB. Only reached
+ * with the persistent DXIL cache on, so g_dxc_cap is set. */
+static struct mad_pack *g_dxc_pack;
+static pthread_once_t g_dxc_pack_once = PTHREAD_ONCE_INIT;
+static void mad_dxc_pack_once(void)
+{
+    g_dxc_pack = mad_sc_pack_open("dxil", MAD_PACK_KIND_DXIL, g_dxc_cap);
+}
+static struct mad_pack *mad_dxc_pack(void)
+{
+    if (!mad_sc_pack_on()) return NULL;
+    pthread_once(&g_dxc_pack_once, mad_dxc_pack_once);
+    return g_dxc_pack;
+}
+
+/* madeira-bcd: a DXIL entry from the pack, or the loose entry of an earlier run
+ * moved into it. The caller frees *blob. */
+static int mad_dxc_pack_load(struct mad_pack *pack, uint64_t key, uint64_t check, void **blob, size_t *len)
+{
+    char path[1200];
+    if (mad_pack_get(pack, key, blob, len)) {
+        if (mad_dxc_blob_valid(*blob, *len, key, check)) return 1;
+        free(*blob);   /* the same 64-bit key for another conversion: convert, as a loose miss would */
+        *blob = NULL; *len = 0;
+        return 0;
+    }
+    if (!mad_sc_path_ext(key, MAD_DXC_EXT, path, sizeof path) || !mad_dxc_file_load(path, key, check, blob, len))
+        return 0;
+    mad_pack_adopt(pack, key, *blob, *len, path);
+    return 1;
+}
+
 static void mad_dxc_store(uint64_t key, const void *blob, size_t len)
 {
     char path[1200], dir[1200];
     uint64_t total;
+    struct mad_pack *pack = mad_dxc_pack();   /* madeira-bcd: NULL unless d3d12-shader-pack */
+    if (pack) { mad_pack_put(pack, key, blob, len); return; }
     if (!mad_sc_path_ext(key, MAD_DXC_EXT, path, sizeof path)) return;
     if (!mad_dxc_file_store(path, blob, len)) {
         if (__atomic_add_fetch(&g_dxc_store_fail, 1, __ATOMIC_RELAXED) <= 3)
@@ -1278,6 +1590,72 @@ static int mad_ags_enabled(void)
         enabled = !(madeira_cfg_get("ags-rewrite", v, sizeof v) && v[0] == '0');
     }
     return enabled;
+}
+
+/* The converter's compatibility flags: D3D12 guarantees the Metal Shader
+ * Converter gives only on request. Each is on by default and can be turned off
+ * in madeira.cfg for an A/B run; the DXIL cache keys on the result, so a
+ * change re-converts once.
+ * - ml932, always: IRCompatibilityFlagForceTextureArray (see the comment at
+ *   IRCompilerSetCompatibilityFlags below).
+ * - msc-bounds-check: D3D12 robust buffer access -- an out-of-range read
+ *   returns 0, an out-of-range write is dropped. Without it a read past a
+ *   buffer returns whatever memory follows. Ghost of Tsushima dispatches a
+ *   normal-recompute kernel rounded up to its group size (221 x 64 threads);
+ *   the threads past the last vertex read their [first, last) adjacency range
+ *   from beyond the buffer, got garbage instead of 0,0 and looped until Metal
+ *   timed the command buffer out (MTLCommandBufferError 2), every run.
+ * - msc-position-invariance: the same vertex shader in two pipelines gives
+ *   bit-identical positions. Metal compiles a vertex function per pipeline and
+ *   may optimise the position math differently in each, so a pass that redraws
+ *   geometry with depth test EQUAL after a depth pre-pass loses pixels at
+ *   random (~350 such draws a frame in Ghost of Tsushima: cloth, hair). DXVK
+ *   and vkd3d-proton declare position invariant by default for the same reason.
+ * - msc-strict-nan: MSC 4.0 compiles with Metal's assumption that no operand
+ *   is NaN or Inf, so isnan() can fold to false and min/max lose their NaN
+ *   rules. D3D12 keeps IEEE semantics (Ghost of Tsushima clears a velocity
+ *   target to NaN as a "not written" marker).
+ * - msc-sampler-lod-bias: apply D3D12_SAMPLER_DESC::MipLODBias. Metal samplers
+ *   have no LOD bias; the runtime already writes it into every sampler
+ *   descriptor's metadata, but the converted shader reads it only with this flag.
+ * - msc-sample-nan-zero: a texture sample that comes back NaN reads 0. A
+ *   filtered read across NaN texels is NaN on Metal, and a NaN that reaches a
+ *   temporal resolve stays in its history and spreads as dark specks.
+ * - msc-position-inf-nan: a vertex position of +-Inf becomes NaN, which Metal
+ *   discards like D3D does. Particle systems kill particles by writing an
+ *   infinite position; kept as Inf, Metal can rasterise a sliver instead. */
+static uint32_t mad_ir_compat_flags(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        /* madeira-bcd: env MADEIRA_IR_NO_BOUNDS_CHECK=1 (the fork's switch, also
+         * read by the PE side for the cache key) turns the bounds check off too. */
+        const char *no_bc = getenv("MADEIRA_IR_NO_BOUNDS_CHECK");
+        int bc = (madeira_cfg_int("msc-bounds-check", 1) && !(no_bc && no_bc[0] == '1')) ? 1 : 0;
+        int inv = madeira_cfg_int("msc-position-invariance", 1) ? 1 : 0;
+        int nan = madeira_cfg_int("msc-strict-nan", 1) ? 1 : 0;
+        int lod = madeira_cfg_int("msc-sampler-lod-bias", 1) ? 1 : 0;
+        int snz = madeira_cfg_int("msc-sample-nan-zero", 1) ? 1 : 0;
+        int pin = madeira_cfg_int("msc-position-inf-nan", 1) ? 1 : 0;
+        int f = (int)IRCompatibilityFlagForceTextureArray |
+                (bc ? (int)IRCompatibilityFlagBoundsCheck : 0) |
+                (inv ? (int)IRCompatibilityFlagPositionInvariance : 0) |
+                (lod ? (int)IRCompatibilityFlagSamplerLODBias : 0) |
+                (snz ? (int)IRCompatibilityFlagSampleNanToZero : 0) |
+                (pin ? (int)IRCompatibilityFlagVertexPositionInfToNan : 0);
+#if IR_VERSION_MAJOR >= 4
+        if (nan) f |= (int)IRCompatibilityFlagDisableNanInfOptimization;
+#else
+        nan = 0;   /* converted IR was strict before 4.0 */
+#endif
+        fprintf(stderr, "[madeira-ir] MSC %d.%d.%d compatibility: bounds check %s, position invariance %s, strict NaN/Inf %s, "
+                        "sampler LOD bias %s, sampled NaN -> 0 %s, Inf position -> NaN %s (madeira.cfg msc-bounds-check, "
+                        "msc-position-invariance, msc-strict-nan, msc-sampler-lod-bias, msc-sample-nan-zero, msc-position-inf-nan; "
+                        "env MADEIRA_IR_NO_BOUNDS_CHECK=1)\n",
+                IR_VERSION_MAJOR, IR_VERSION_MINOR, IR_VERSION_PATCH, bc ? "on" : "off", inv ? "on" : "off",
+                nan ? "on" : "off", lod ? "on" : "off", snz ? "on" : "off", pin ? "on" : "off");
+        cached = f;   /* one store: another converting thread sees -1 or the whole value */
+    }
+    return (uint32_t)cached;
 }
 
 extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
@@ -1357,6 +1735,7 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
     struct madeira_ir_vs_input *all_vsin = NULL;
     uint32_t n_locs = 0, n_vsin = 0, vs_count = 0, vs_out_size = 0;
     uint32_t tg[3] = { 0, 0, 0 }, gs_max = 0, gs_payload = 0, gs_pt = 0;
+    uint32_t hs[8] = { 0 }, ds[4] = { 0 };   /* DXIL tessellation reflection, ret_hs_* / ret_ds_* order */
     size_t lib2_len = 0, dxc_len = 0;
     char dxc_note[128] = "";
     void *dxc_blob = NULL;
@@ -1373,15 +1752,17 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
         void *hit = NULL;
         size_t hit_len = 0;
         env.converter_ident = g_ir.ident;
-        env.build_stamp = __DATE__ " " __TIME__;
+        env.build_stamp = MAD_SC_BUILD;
         env.ags_rewrite = (uint32_t)mad_ags_enabled();
-        env.compat_flags = (uint32_t)IRCompatibilityFlagForceTextureArray;
+        env.compat_flags = mad_ir_compat_flags();
         mad_dxc_key(a, &env, &dxc_key, &dxc_check);
         if (dxc_slot) hit = mad_dxc_slot_take(dxc_key, dxc_check, &hit_len);
         if (!hit && dxc_disk) {
             char path[1200];
-            int found = mad_sc_path_ext(dxc_key, MAD_DXC_EXT, path, sizeof path) &&
-                        mad_dxc_file_load(path, dxc_key, dxc_check, &hit, &hit_len);
+            struct mad_pack *pack = mad_dxc_pack();   /* madeira-bcd: NULL unless d3d12-shader-pack */
+            int found = pack ? mad_dxc_pack_load(pack, dxc_key, dxc_check, &hit, &hit_len)
+                             : (mad_sc_path_ext(dxc_key, MAD_DXC_EXT, path, sizeof path) &&
+                                mad_dxc_file_load(path, dxc_key, dxc_check, &hit, &hit_len));
             mad_dxc_count(found);
         }
         if (hit) {
@@ -1517,8 +1898,9 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
      * (TSR history: update declares 2darray, resolve declares 2d); Metal
      * returns zeros on the mismatch. With this flag every 1D/2D/cube texture
      * is an array in the converted shader, and the runtime allocates and
-     * views every such texture as an array to match. */
-    g_ir.IRCompilerSetCompatibilityFlags(compiler, IRCompatibilityFlagForceTextureArray);
+     * views every such texture as an array to match. The other flags:
+     * mad_ir_compat_flags. */
+    g_ir.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)mad_ir_compat_flags());
     a->ret_len2 = 0; a->ret_vs_output_size = 0; a->ret_gs_max_prims = 0; a->ret_gs_payload = 0; a->ret_gs_passthrough = 0;
     if (a->gs_emulation) {   /* ml927 */
         IRInputTopology topo = IRInputTopologyTriangle;
@@ -1681,7 +2063,46 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
                 g_ir.IRShaderReflectionReleaseGeometryInfo(&gsi);
             }
         }
+        /* DXIL tessellation: a hull or domain shader converted for the
+         * converter's emulation reports the numbers the pipeline and every draw
+         * need (IRRuntimeTessellationPipelineConfig, and the domain side of
+         * IRRuntimeValidateTessellationPipeline). */
+        if (a->gs_emulation && stage == IRShaderStageHull &&
+            g_ir.IRShaderReflectionCopyHullInfo && g_ir.IRShaderReflectionReleaseHullInfo) {
+            IRVersionedHSInfo hsi;
+            memset(&hsi, 0, sizeof hsi);
+            if (g_ir.IRShaderReflectionCopyHullInfo(refl, IRReflectionVersion_1_0, &hsi)) {
+                float mf = hsi.info_1_0.max_tessellation_factor;
+                hs[0] = hsi.info_1_0.max_patches_per_object_threadgroup;
+                hs[1] = hsi.info_1_0.max_object_threads_per_patch;
+                hs[2] = hsi.info_1_0.input_control_point_count;
+                hs[3] = hsi.info_1_0.output_control_point_count;
+                hs[4] = hsi.info_1_0.output_control_point_size;
+                hs[5] = hsi.info_1_0.patch_constants_size;
+                hs[6] = (uint32_t)hsi.info_1_0.tessellator_output_primitive;
+                memcpy(&hs[7], &mf, sizeof mf);
+                g_ir.IRShaderReflectionReleaseHullInfo(&hsi);
+            }
+        }
+        if (a->gs_emulation && stage == IRShaderStageDomain &&
+            g_ir.IRShaderReflectionCopyDomainInfo && g_ir.IRShaderReflectionReleaseDomainInfo) {
+            IRVersionedDSInfo dsi;
+            memset(&dsi, 0, sizeof dsi);
+            if (g_ir.IRShaderReflectionCopyDomainInfo(refl, IRReflectionVersion_1_0, &dsi)) {
+                ds[0] = dsi.info_1_0.max_input_prims_per_mesh_threadgroup;
+                ds[1] = dsi.info_1_0.input_control_point_count;
+                ds[2] = dsi.info_1_0.input_control_point_size;
+                ds[3] = dsi.info_1_0.patch_constants_size;
+                g_ir.IRShaderReflectionReleaseDomainInfo(&dsi);
+            }
+        }
     }
+    /* An emulated hull/domain stage is looked up by the converter's fixed
+     * names when its pipeline is built, never by this one; name it so an empty
+     * reflection name cannot fail the conversion. */
+    if (a->gs_emulation && (!nm || !nm[0]) &&
+        (stage == IRShaderStageHull || stage == IRShaderStageDomain))
+        nm = stage == IRShaderStageHull ? "irconverter_hull_shader" : "irconverter_dxil_domain_shader";
     if (!nm || !nm[0]) {
         status = MADEIRA_IR_EMPTY_ENTRY;
         goto done;
@@ -1697,6 +2118,7 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
         parts.tg[0] = tg[0]; parts.tg[1] = tg[1]; parts.tg[2] = tg[2];
         parts.vs_output_size = vs_out_size;
         parts.gs_max_prims = gs_max; parts.gs_payload = gs_payload; parts.gs_passthrough = gs_pt;
+        memcpy(parts.hs, hs, sizeof parts.hs); memcpy(parts.ds, ds, sizeof parts.ds);
         parts.lib = lib_bytes; parts.lib_len = need;
         parts.lib2 = lib2_bytes; parts.lib2_len = lib2_len;
         dxc_blob = mad_dxc_blob_build(dxc_key, dxc_check, &parts, &dxc_len);

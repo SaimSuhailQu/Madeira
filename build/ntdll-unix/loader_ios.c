@@ -38,6 +38,7 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <time.h>
 #include <dlfcn.h>
 #ifdef HAVE_PWD_H
 # include <pwd.h>
@@ -1401,7 +1402,98 @@ extern NTSTATUS unixcall_ios_get_fex_arena(void *args);          /* ml800, virtu
 
 static NTSTATUS ios_wrap_0(void *a) { return ios_wrap_unix_call(0, a, load_so_dll); }
 static NTSTATUS ios_wrap_1(void *a) { return ios_wrap_unix_call(1, a, unwind_builtin_dll); }
-static NTSTATUS ios_wrap_2(void *a) { return ios_wrap_unix_call(2, a, unixcall_wine_dbg_write); }
+/* madeira-bcd: rtcs-cap v1. The PE ntdll (upstream's tracked binary) prints
+ * "[rtcs] pre:" for every exception prepare_exception_arm64ec sees; its
+ * 40-line cap (signal_arm64ec.c) only covers the block before the ERR. A
+ * self-modifying launcher (RockstarService, builds 435-437) faults 150-1000
+ * times a second, so that one line was 42-53% of the session log, each one a
+ * write(2) and a pass through the log pipeline. Keep at most N such lines per
+ * second per thread (the "%04x:" prefix, hashed into 64 slots), count the
+ * rest, and say how many were left out once a second while it happens.
+ * MADEIRA_RTCS_LOG=all prints every line; a number sets N (default 10, 0 =
+ * none). Every other dbg_write is untouched. */
+#define IOS_RTCS_SLOTS 64
+static int ios_rtcs_limit = -2;                     /* -2 = not read yet, -1 = every line */
+static long long ios_rtcs_slot_second[IOS_RTCS_SLOTS];
+static int ios_rtcs_slot_lines[IOS_RTCS_SLOTS];
+static long long ios_rtcs_note_second = -1;
+static unsigned long long ios_rtcs_seen, ios_rtcs_dropped, ios_rtcs_unnoted;
+
+static int ios_rtcs_read_limit( void )
+{
+    const char *e = getenv( "MADEIRA_RTCS_LOG" );   /* all: every "[rtcs] pre" line; N: at most N a second per thread (default 10, 0 none) */
+    char *end;
+    long n;
+
+    if (!e || !*e) return 10;
+    if (!strcmp( e, "all" )) return -1;
+    n = strtol( e, &end, 10 );
+    if (*end || n < 0) return 10;
+    return n > 100000 ? 100000 : (int)n;
+}
+
+/* 1 = write the line, 0 = leave it out */
+static int ios_rtcs_admit( const char *str, unsigned int len )
+{
+    static const char tag[] = "[rtcs] pre: ";
+    unsigned int scan = len < 160 ? len : 160, i, slot, hash = 2166136261u;
+    long long now, last;
+    struct timespec ts;
+    int limit;
+
+    for (i = 0; i + sizeof(tag) - 1 <= scan; i++)
+        if (str[i] == '[' && !memcmp( str + i, tag, sizeof(tag) - 1 )) break;
+    if (i + sizeof(tag) - 1 > scan) return 1;
+    limit = __atomic_load_n( &ios_rtcs_limit, __ATOMIC_RELAXED );
+    if (limit == -2)
+    {
+        limit = ios_rtcs_read_limit();
+        __atomic_store_n( &ios_rtcs_limit, limit, __ATOMIC_RELAXED );
+    }
+    __atomic_add_fetch( &ios_rtcs_seen, 1, __ATOMIC_RELAXED );
+    if (limit < 0) return 1;
+
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    now = ts.tv_sec;
+    last = __atomic_load_n( &ios_rtcs_note_second, __ATOMIC_RELAXED );
+    if (now != last && __atomic_compare_exchange_n( &ios_rtcs_note_second, &last, now, 0,
+                                                     __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+    {
+        unsigned long long unnoted = __atomic_exchange_n( &ios_rtcs_unnoted, 0, __ATOMIC_RELAXED );
+        if (unnoted)
+        {
+            char note[256];
+            int n = snprintf( note, sizeof(note),
+                              "[rtcs-cap] madeira-bcd v1: %llu '[rtcs] pre' lines left out since the last note "
+                              "(%llu seen, %llu left out; %d per second per thread kept; "
+                              "MADEIRA_RTCS_LOG=all prints every line)\n",
+                              unnoted, __atomic_load_n( &ios_rtcs_seen, __ATOMIC_RELAXED ),
+                              __atomic_load_n( &ios_rtcs_dropped, __ATOMIC_RELAXED ), limit );
+            if (n > 0) write( 2, note, n < (int)sizeof(note) ? n : (int)sizeof(note) - 1 );
+        }
+    }
+
+    for (i = 0; i < len && i < 16 && str[i] != ':'; i++) hash = (hash ^ (unsigned char)str[i]) * 16777619u;
+    slot = hash % IOS_RTCS_SLOTS;
+    if (__atomic_exchange_n( &ios_rtcs_slot_second[slot], now, __ATOMIC_RELAXED ) != now)
+        __atomic_store_n( &ios_rtcs_slot_lines[slot], 0, __ATOMIC_RELAXED );
+    if (__atomic_add_fetch( &ios_rtcs_slot_lines[slot], 1, __ATOMIC_RELAXED ) <= limit) return 1;
+    __atomic_add_fetch( &ios_rtcs_dropped, 1, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &ios_rtcs_unnoted, 1, __ATOMIC_RELAXED );
+    return 0;
+}
+
+static NTSTATUS ios_wrap_2(void *a)
+{
+    const struct { const char *str; unsigned int len; } *p = a;
+
+    if (!ios_rtcs_admit( p->str, p->len ))
+    {
+        g_wine_unix_call_count++;
+        return p->len;  /* what write() returns for the whole line */
+    }
+    return ios_wrap_unix_call(2, a, unixcall_wine_dbg_write);
+}
 static NTSTATUS ios_wrap_3(void *a) { return ios_wrap_unix_call(3, a, unixcall_wine_server_call); }
 static NTSTATUS ios_wrap_4(void *a) { return ios_wrap_unix_call(4, a, unixcall_wine_server_fd_to_handle); }
 static NTSTATUS ios_wrap_5(void *a) { return ios_wrap_unix_call(5, a, unixcall_wine_server_handle_to_fd); }
@@ -2169,6 +2261,18 @@ static void load_ntdll_functions( HMODULE module )
             }
             else dprintf( 2, "XLATE-HOOK-REV export NOT FOUND\n" );
         }
+        /* RtlPcToFileHeader must map JIT-pool aliases (virtual_ios.c). */
+        if (is_arm64ec())
+        {
+            extern int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr );
+            void *f = (void *)find_named_export( module, exports, "RtlPcToFileHeader" );
+            if (f) ios_patch_rtl_pc_to_file_header( module, f );
+        }
+        {   /* madeira-bcd: the [exec-req] path of NtProtectVirtualMemory leaves the
+             * syscall callback (virtual_ios.c, opt-in MADEIRA_EXECREQ_LEAVE=1) */
+            extern int ios_patch_execreq_leave( void *module );
+            ios_patch_execreq_leave( module );
+        }
     }
 
     /* Sync dispatcher pointers to JIT pool .data copy.
@@ -2510,6 +2614,17 @@ static int ios_load_child_ec_ntdll( PEB *child_peb )
             }
             else dprintf( 2, "[ec-child-ntdll] p_ios_jit_reverse_translate_addr NOT FOUND"
                              " -- unwind will run in pool space\n" );
+        }
+        /* RtlPcToFileHeader must map JIT-pool aliases (virtual_ios.c). */
+        {
+            extern int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr );
+            void *f = (void *)find_named_export( module, exports, "RtlPcToFileHeader" );
+            if (f) ios_patch_rtl_pc_to_file_header( module, f );
+        }
+        {   /* madeira-bcd: the [exec-req] path of NtProtectVirtualMemory leaves the
+             * syscall callback (virtual_ios.c, opt-in MADEIRA_EXECREQ_LEAVE=1) */
+            extern int ios_patch_execreq_leave( void *module );
+            ios_patch_execreq_leave( module );
         }
 
         /* Sync all written slots into the pool copy (PE code reads there). */
@@ -3008,6 +3123,16 @@ static void start_main_thread(void)
     virtual_map_user_shared_data();
     WINE_IOS_LOG("init_cpu_info...");
     init_cpu_info();
+#ifdef WINE_IOS
+    /* wineboot's volatile HARDWARE\DESCRIPTION keys (server_ios.c). After
+     * init_cpu_info, which sets the processor count the keys and the SMBIOS
+     * table are built from. First process of a session only. */
+    {
+        extern void ios_hw_registry_publish(void);
+        WINE_IOS_LOG("ios_hw_registry_publish...");
+        ios_hw_registry_publish();
+    }
+#endif
     WINE_IOS_LOG("init_files...");
     init_files();
     WINE_IOS_LOG("init_startup_info...");
@@ -3402,6 +3527,87 @@ static void check_command_line( int argc, char *argv[] )
  */
 extern size_t server_init_process_child( int child_fd_socket );
 
+/* iOS-Madeira ml1213: ONE CHILD BOOTS AT A TIME.
+ *
+ * wine_ios_child_main runs on the new process's own pthread and works through
+ * session-wide state (the global peb, main_image_info and its restore, the WoW
+ * window binding). Two children booting at once corrupted each other: a program
+ * started three 32-bit children within 3 ms, and the log shows
+ * `[init-peb] thread_peb=0x800310000 global_peb=0xa00310000 <-- MISMATCH`, the
+ * first child mapping its image into the SECOND child's window and starting with
+ * that child's PEB and entry point, the second starting at explorer's entry --
+ * both died in their 32-bit ntdll. The lock covers the unix boot, from entry to
+ * the jump into guest code (server_init_process_done).
+ *
+ * A booting child can also end through pthread_exit (fatal_error/fatal_perror
+ * during init, abort_thread -> pthread_exit_wrapper), which runs neither
+ * CHILD_BOOT_FAIL nor the unlock after wine_ios_child_main returns. The key's
+ * destructor runs on that thread as it exits and drops the lock it still holds;
+ * otherwise every later child boot of the session would wait forever. It only
+ * reads its argument: thread-local variables may already be gone by then. */
+static pthread_mutex_t ios_child_boot_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t ios_child_boot_once = PTHREAD_ONCE_INIT;
+static pthread_key_t ios_child_boot_key;
+static int ios_child_boot_key_ok;
+static __thread int ios_child_boot_held;
+
+static void ios_child_boot_key_dtor( void *held )
+{
+    if (!held) return;
+    dprintf( STDERR_FILENO, "[Wine child] ml1213: a booting child exited holding the boot lock; released\n" );
+    pthread_mutex_unlock( &ios_child_boot_mutex );
+}
+
+static void ios_child_boot_key_init( void )
+{
+    ios_child_boot_key_ok = !pthread_key_create( &ios_child_boot_key, ios_child_boot_key_dtor );
+}
+
+void ios_child_boot_unlock( void );
+void ios_child_boot_unlock( void )
+{
+    if (!ios_child_boot_held) return;
+    ios_child_boot_held = 0;
+    if (ios_child_boot_key_ok) pthread_setspecific( ios_child_boot_key, NULL );
+    pthread_mutex_unlock( &ios_child_boot_mutex );
+}
+
+static void ios_child_boot_lock( const char *who )
+{
+    static int on = -1;
+    int ms;
+
+    if (ios_child_boot_held) return;
+    if (on < 0)
+    {
+        /* 0: child processes boot at once, side by side, as before ml1213 */
+        const char *env = getenv( "MADEIRA_CHILD_BOOT_SERIAL" );
+        on = !(env && env[0] == '0');
+    }
+    if (!on) return;
+    pthread_once( &ios_child_boot_once, ios_child_boot_key_init );
+    if (pthread_mutex_trylock( &ios_child_boot_mutex ))
+    {
+        static int waits;
+        if (waits++ < 16)
+            dprintf( STDERR_FILENO, "[Wine child] ml1213 %s: another child is booting, waiting\n", who );
+        /* At most 10 s: a child whose boot hangs without exiting must not stop every
+         * later CreateProcess of the session. Past that this one boots alongside. */
+        for (ms = 0; pthread_mutex_trylock( &ios_child_boot_mutex ); ms += 10)
+        {
+            if (ms >= 10000)
+            {
+                dprintf( STDERR_FILENO, "[Wine child] ml1213 %s: another child's boot has not finished "
+                         "in 10 s; booting alongside it\n", who );
+                return;
+            }
+            usleep( 10000 );
+        }
+    }
+    ios_child_boot_held = 1;
+    if (ios_child_boot_key_ok) pthread_setspecific( ios_child_boot_key, (void *)1 );
+}
+
 DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_socket )
 {
     /* set by the spawner (process_ios.c) and updated as this child boots, so a
@@ -3426,9 +3632,11 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
                  ios_child_boot_stage, ##__VA_ARGS__ );                                  \
         ERR( "[Wine child] boot FAILED at stage '%s' for %s: " fmt,                      \
              ios_child_boot_stage, argc > 1 ? argv[1] : "?", ##__VA_ARGS__ );            \
+        ios_child_boot_unlock();                                                        \
         return;                                                                         \
     } while (0)
     CHILD_STAGE( "entry" );
+    ios_child_boot_lock( argc > 1 ? argv[1] : "?" );   /* ml1213 */
 
     /* X1 recon: EC-ness is currently session-wide (main_image_info /
      * current_machine are shared ntdll-unix globals). Log what this child
@@ -3776,6 +3984,23 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
                         ios_jit_sync_write(ios_ntdll_unixlib_handle_ptr, sizeof(UINT_PTR));
                         dprintf(STDERR_FILENO, "[Wine child]   -> repaired unixlib handle slot\n");
                     }
+                }
+                /* The copy is fresh from the PE image: give it the same
+                 * RtlPcToFileHeader pool-alias patch as the session's copy
+                 * (virtual_ios.c, logs a [pc2fh] line). ARM64EC only: the patch is
+                 * for the arm64ec ntdll, and an aarch64/WoW64 child only logged
+                 * "not patched". */
+                if (is_arm64ec())
+                {
+                    extern int ios_patch_rtl_pc_to_file_header_current( const void *pe_addr );
+                    ios_patch_rtl_pc_to_file_header_current( pLdrInitializeThunk );
+                }
+                /* madeira-bcd: and the [exec-req] leave fix (virtual_ios.c,
+                 * opt-in MADEIRA_EXECREQ_LEAVE=1):
+                 * GTA V Enhanced runs in such a child. */
+                {
+                    extern int ios_patch_execreq_leave_current( const void *pe_addr );
+                    ios_patch_execreq_leave_current( pLdrInitializeThunk );
                 }
             }
         }
