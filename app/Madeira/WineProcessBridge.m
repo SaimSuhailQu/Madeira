@@ -1242,6 +1242,7 @@ static void *wine_process_thread(void *arg) {
                     "MADEIRA_DINPUT_PAD",        /* ml1240: the game's "XInput and DirectInput" */
                     "MADEIRA_FEX_AVX",           /* ml1184: the game's "AVX and AVX2" */
                     "MADEIRA_FRAMEGEN",          /* ml1184: the game's "Frame generation" */
+                    "MADEIRA_LAUNCHER", "MADEIRA_LEGACY_UPLAY", /* vendor launcher profile */
                     "DXMT_ENABLE_NVEXT", "DXMT_WSI_MONITOR_IDENTITY", "DXMT_WSI_MODE_TABLE",   /* the game's "Report an NVIDIA GPU" */
                 };
                 enum { per_launch_count = sizeof(per_launch) / sizeof(per_launch[0]) };
@@ -1856,6 +1857,7 @@ static void *wine_process_thread(void *arg) {
         unsetenv("MADEIRA_SRV_FGETPATH");
         g_madeira_srv_fgetpath = 0;
         unsetenv("MADEIRA_FEX_AVX"); unsetenv("MADEIRA_FRAMEGEN");   /* ml1184 */
+        unsetenv("MADEIRA_LAUNCHER"); unsetenv("MADEIRA_LEGACY_UPLAY");
         unsetenv("DXMT_ENABLE_NVEXT"); unsetenv("DXMT_WSI_MONITOR_IDENTITY"); unsetenv("DXMT_WSI_MODE_TABLE");
         /* madeira-bcd: the server's per-launch switches end with the session */
         unsetenv("MADEIRA_SRV_ECO_FOLLOW"); unsetenv("MADEIRA_SRV_DIRECT");
