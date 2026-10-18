@@ -5,6 +5,7 @@
 // programs and are downloaded by the user from their official endpoints. This
 // file only adds the profiles and prefix repairs needed to run them in Wine.
 
+import Combine
 import Foundation
 import SwiftUI
 
