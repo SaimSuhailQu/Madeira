@@ -3,9 +3,15 @@
 Madeira can run the Windows versions of Ubisoft Connect, Epic Games Launcher
 and Rockstar Games Launcher in the Wine desktop. The launchers are not shipped
 in the app. In **Settings › PC game launchers**, Madeira downloads the current
-installer from the vendor's HTTPS endpoint, puts it in
-`wine/drive_c/madeira-downloads`, and adds it to the library. Run that entry
-once, then use **Add to library** for the installed launcher.
+installer from the vendor's HTTPS endpoint into
+`wine/drive_c/madeira-downloads`, then **Install silently** runs it in the Wine
+desktop with the vendor's silent flags (`/S` for the NSIS-based Ubisoft and
+Rockstar installers, `/qn` for Epic's MSI, which runs through msiexec): there
+is no wizard to click through. Unlike Steam's file-package setup, the vendors
+only publish interactive installers, so the install runs as a normal Wine
+desktop session — end the session when the desktop goes idle. The download also
+adds an "Install …" entry to the library, which installs silently the same way
+when opened. Once installed, use **Add to library** for the launcher itself.
 
 ## Ubisoft Connect and older Assassin's Creed games
 

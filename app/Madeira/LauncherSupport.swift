@@ -69,6 +69,18 @@ enum LauncherID: String, CaseIterable, Codable, Hashable, Identifiable {
 
     var installerArguments: String { "" }
 
+    /// Silent-install flags for the vendor's own installer, run in the Wine
+    /// desktop. The Ubisoft and Rockstar installers are NSIS-based (/S is the
+    /// NSIS silent switch); Epic's installer is an MSI, which the library
+    /// starts through msiexec /i, so it takes /qn.
+    var silentInstallArguments: String {
+        switch self {
+        case .ubisoft: return "/S"
+        case .epic: return "/qn"
+        case .rockstar: return "/S"
+        }
+    }
+
     /// Registry values used by installers and by games that launch through a
     /// vendor protocol. Both registry views are written because AC titles are
     /// frequently 32-bit while the current Ubisoft client is 64-bit.
@@ -207,6 +219,28 @@ enum LauncherSupport {
         entry.startServices = true
         entry.workingDirectory = windowsFolder(executable)
         entry.arguments = id.installerArguments
+        return entry
+    }
+
+    /// The library entry that installs the launcher: the downloaded installer
+    /// with its silent flags, run in the Wine desktop with services on. The
+    /// installer needs no clicks; opening this entry from the library installs
+    /// it the same way the Install button does.
+    static func installerEntry(for id: LauncherID) throws -> LibraryEntry {
+        let target = LibraryModel.drive.appendingPathComponent(downloadFolder, isDirectory: true)
+            .appendingPathComponent(id.installerFilename)
+        var entry: LibraryEntry
+        if id.installerFilename.lowercased().hasSuffix(".msi") {
+            let relative = String(target.resolvingSymlinksInPath().path.dropFirst(LibraryModel.drive.path.count + 1))
+            entry = LibraryEntry(title: "Install \(id.title)", relativePath: relative, bits: 0)
+        } else {
+            entry = try LibraryModel.inspect(target)
+            entry.title = "Install \(id.title)"
+        }
+        entry.arguments = id.silentInstallArguments
+        entry.launchMode = "desktop"
+        entry.workingDirectory = "C:\\" + downloadFolder
+        entry.startServices = true
         return entry
     }
 
@@ -356,9 +390,29 @@ final class LauncherSupportModel: ObservableObject {
 
     @Published private(set) var detected: [LauncherID: URL] = [:]
     @Published private(set) var downloading: LauncherID?
+    @Published private(set) var installing: LauncherID?
     @Published private(set) var status = ""
     @Published var error: String?
     private var downloadTask: URLSessionDownloadTask?
+    private var sessionWatcher: AnyCancellable?
+
+    private init() {
+        // A silent install runs as a normal library session. When it ends,
+        // re-detect the launcher so the section flips to installed by itself.
+        sessionWatcher = LibraryModel.shared.$current
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] current in
+                guard let self, current == nil, let installing = self.installing else { return }
+                self.installing = nil
+                self.refresh()
+                if self.detected[installing] != nil {
+                    self.status = "\(installing.title) installed — tap Add to library."
+                    LogStore.shared.log("[launcher] silent install done id=\(installing.rawValue)")
+                } else {
+                    self.status = "\(installing.title) was not detected after the session. If its installer did not finish, install it again."
+                }
+            }
+    }
 
     func refresh() {
         var found: [LauncherID: URL] = [:]
@@ -366,6 +420,52 @@ final class LauncherSupportModel: ObservableObject {
             if let url = LauncherSupport.resolve(id) { found[id] = url }
         }
         detected = found
+    }
+
+    /// The vendor installer is on disk in madeira-downloads and the launcher
+    /// itself is not installed yet: the Install button applies.
+    func installerDownloaded(_ id: LauncherID) -> Bool {
+        guard detected[id] == nil else { return false }
+        let path = LibraryModel.drive.appendingPathComponent(LauncherSupport.downloadFolder, isDirectory: true)
+            .appendingPathComponent(id.installerFilename).path
+        return FileManager.default.fileExists(atPath: path)
+    }
+
+    /// Starts the downloaded installer with its silent flags through the
+    /// shortcut path, exactly as opening its library entry would: ContentView
+    /// launches it like its Play button (JIT check, preflight, full Wine
+    /// sequence), and the installer runs with no wizard to click through. The
+    /// session watcher above reports when it ends.
+    func install(_ id: LauncherID) {
+        guard downloading == nil, installing == nil else { return }
+        guard wine_process_is_running() == 0 else {
+            error = "A Wine session is already running. End it, then install \(id.title)."
+            return
+        }
+        guard installerDownloaded(id) else { download(id); return }
+        do {
+            var entry = try LauncherSupport.installerEntry(for: id)
+            if let old = LibraryModel.shared.entries.first(where: { $0.relativePath.caseInsensitiveCompare(entry.relativePath) == .orderedSame }) { entry.id = old.id }
+            LibraryModel.shared.save(entry)
+            installing = id
+            status = "Installing \(id.title) silently — this takes a few minutes. End the Wine session when the desktop goes idle."
+            LogStore.shared.log("[launcher] silent install started id=\(id.rawValue)")
+            ShortcutRouter.shared.pendingExe = nil
+            ShortcutRouter.shared.pendingExe = entry.launchWindowsPath
+            // The shortcut may never fire (a held launch, a JIT flow that never
+            // completes): do not leave the section stuck on installing.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                guard self.installing == id, LibraryModel.shared.current == nil else { return }
+                self.installing = nil
+                self.refresh()
+                if self.detected[id] == nil {
+                    self.status = "The install session did not start. \(LibraryModel.shared.error ?? "Try again.")"
+                }
+            }
+        } catch {
+            self.error = "The \(id.title) installer could not start: \(error.localizedDescription)"
+        }
     }
 
     func add(_ id: LauncherID) {
@@ -395,7 +495,7 @@ final class LauncherSupportModel: ObservableObject {
     }
 
     func download(_ id: LauncherID) {
-        guard downloading == nil else { return }
+        guard downloading == nil, installing == nil else { return }
         let directory = LibraryModel.drive.appendingPathComponent(LauncherSupport.downloadFolder, isDirectory: true)
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
         catch { self.error = "Could not create the installer folder: \(error.localizedDescription)"; return }
@@ -415,20 +515,10 @@ final class LauncherSupportModel: ObservableObject {
                 do {
                     try? FileManager.default.removeItem(at: target)
                     try FileManager.default.moveItem(at: temporary, to: target)
-                    var entry: LibraryEntry
-                    if id.installerFilename.lowercased().hasSuffix(".msi") {
-                        let relative = String(target.resolvingSymlinksInPath().path.dropFirst(LibraryModel.drive.path.count + 1))
-                        entry = LibraryEntry(title: "Install \(id.title)", relativePath: relative, bits: 0)
-                    } else {
-                        entry = try LibraryModel.inspect(target)
-                        entry.title = "Install \(id.title)"
-                    }
-                    entry.launchMode = "desktop"
-                    entry.workingDirectory = "C:\\" + LauncherSupport.downloadFolder
-                    entry.startServices = true
+                    var entry = try LauncherSupport.installerEntry(for: id)
                     if let old = LibraryModel.shared.entries.first(where: { $0.relativePath.caseInsensitiveCompare(entry.relativePath) == .orderedSame }) { entry.id = old.id }
                     LibraryModel.shared.save(entry)
-                    self.status = "Downloaded the \(id.title) installer. Open it from the library to install it."
+                    self.status = "Downloaded the \(id.title) installer."
                     LogStore.shared.log("[launcher] downloaded installer id=\(id.rawValue)")
                 } catch { self.error = "The \(id.title) installer could not be added: \(error.localizedDescription)" }
             }
@@ -443,7 +533,7 @@ struct LauncherSupportSettingsSection: View {
 
     var body: some View {
         Section {
-            Text("Madeira runs the vendors' Windows launchers inside the Wine desktop. Installers are downloaded only when you tap Download, and your account credentials stay inside each vendor's own sign-in window.")
+            Text("Madeira runs the vendors' Windows launchers inside the Wine desktop. Download an installer, then Install silently: it runs in the Wine desktop with no wizard to click through. Your account credentials stay inside each vendor's own sign-in window.")
                 .font(.footnote).foregroundStyle(.secondary)
             ForEach(LauncherID.allCases) { id in
                 VStack(alignment: .leading, spacing: 8) {
@@ -459,11 +549,19 @@ struct LauncherSupportSettingsSection: View {
                             Button("Add to library") { support.add(id) }
                             if id == .ubisoft { Button("Repair Uplay") { support.repair(id) } }
                         }.buttonStyle(.bordered)
+                    } else if support.installing == id {
+                        HStack { ProgressView(); Text("Installing silently…") }.font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text("Not detected in drive_c").font(.caption).foregroundStyle(.secondary)
-                        Button("Download official installer") { support.download(id) }
-                            .buttonStyle(.bordered)
-                            .disabled(support.downloading != nil)
+                        if support.installerDownloaded(id) {
+                            Button("Install silently") { support.install(id) }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(support.downloading != nil || support.installing != nil)
+                        } else {
+                            Button("Download official installer") { support.download(id) }
+                                .buttonStyle(.bordered)
+                                .disabled(support.downloading != nil || support.installing != nil)
+                        }
                     }
                 }.padding(.vertical, 4)
             }
