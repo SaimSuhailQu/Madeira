@@ -214,7 +214,7 @@ enum LauncherSupport {
     /// idempotent and only runs while no Wine session has the registry open.
     static func prepare(_ entry: LibraryEntry) throws {
         if let raw = entry.launcherID, let id = LauncherID(rawValue: raw),
-           let executable = LibraryModel.hostURL(ofWindowsPath: entry.launchWindowsPath) {
+           let executable = LibraryEntry.hostURL(ofWindowsPath: entry.launchWindowsPath) {
             try repair(id, executable: executable)
             return
         }
@@ -380,7 +380,7 @@ final class LauncherSupportModel: ObservableObject {
             LibraryModel.shared.save(entry)
             status = "Added \(id.title) to the library."
             refresh()
-        } catch { error = error.localizedDescription }
+        } catch { self.error = error.localizedDescription }
     }
 
     func repair(_ id: LauncherID) {
@@ -391,14 +391,14 @@ final class LauncherSupportModel: ObservableObject {
         do {
             let count = try LauncherSupport.repair(id, executable: executable)
             status = count == 0 ? "\(id.title) is already repaired." : "Repaired \(id.title) (\(count) compatibility changes)."
-        } catch { error = error.localizedDescription }
+        } catch { self.error = error.localizedDescription }
     }
 
     func download(_ id: LauncherID) {
         guard downloading == nil else { return }
         let directory = LibraryModel.drive.appendingPathComponent(LauncherSupport.downloadFolder, isDirectory: true)
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
-        catch { error = "Could not create the installer folder: \(error.localizedDescription)"; return }
+        catch { self.error = "Could not create the installer folder: \(error.localizedDescription)"; return }
 
         downloading = id; error = nil; status = "Downloading \(id.title)…"
         let task = URLSession.shared.downloadTask(with: id.installerURL) { [weak self] temporary, response, failure in
