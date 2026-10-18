@@ -71,6 +71,17 @@ git-ignored and consumed by the app project.
    -> `app/Madeira/aarch64-windows/xtajit.dll`) and the aarch64 `wow64.dll` /
    `wow64win.dll`; see docs/WOW64.md, "Building". UNVERIFIED on macOS.
 
+### xtool
+
+`xtool sdk status` can verify/install the Darwin Swift SDK on Linux, but
+`xtool dev build` only accepts a Swift Package. Madeira is an Xcode project
+because it links Objective-C bridges, Wine/FEX/DXMT static libraries, bundled
+PE resources and the JIT helper. The IPA command therefore remains
+`MADEIRA_CONFIGURATION=Debug tools/build/package-ipa.sh` on macOS with Xcode;
+running `xtool dev build --ipa` at the repository root stops with
+"Could not find Package.swift" and must not be used to create a placeholder
+IPA.
+
 ## Status of the LGPL relink question
 
 A recipient of a built package can obtain the complete corresponding
