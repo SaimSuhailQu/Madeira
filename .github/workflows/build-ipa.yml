@@ -186,6 +186,22 @@ jobs:
         run: |
           xcodebuild -downloadComponent MetalToolchain
 
+      - name: Build the 32-bit (i386) Windows DLLs
+        # Upstream's CI builds this set in a separate i386 job and hands it to
+        # the app job as an artifact; build-ipa.sh deliberately skips the i386
+        # build in CI (it only runs when GITHUB_ACTIONS is unset). This fork
+        # workflow is single-job, so it must build the set itself before
+        # build-ipa.sh packages the IPA, or packaging fails with
+        # "no item named 'Payload/Madeira.app/i386-windows/ntdll.dll'".
+        # Mirrors upstream's i386 job: toolchain, Metal toolchain (above),
+        # shader headers, then the farm build. setup-llvm-mingw.sh and
+        # build-shader-headers.sh are both idempotent, so build-ipa.sh
+        # re-running them later is harmless.
+        run: |
+          tools/build/setup-llvm-mingw.sh
+          tools/build/build-shader-headers.sh
+          build/wine-i386/build.sh
+
       - name: Run build-ipa.sh
         run: |
           ./tools/build-ipa.sh
