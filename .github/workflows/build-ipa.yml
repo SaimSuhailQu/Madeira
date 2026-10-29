@@ -19,7 +19,12 @@ concurrency:
 jobs:
   build:
     name: Build IPA
-    runs-on: macos-26
+    # Upstream builds on xcode-27: DXMT's Metal shader patch (build-shader-headers.sh)
+    # targets Metal toolchain 32023 (Xcode 27). On macos-26's Xcode 26.6 the patch
+    # actively breaks the build: Xcode 26.6 already defines __METAL_MEMORY_FLAGS_NONE__
+    # but its __metal_atomic_fetch_add_explicit has no 5-argument overload, so the
+    # patched air_tessellation.metal fails with "expected 4, have 5".
+    runs-on: xcode-27
     timeout-minutes: 360
     permissions:
       contents: write
@@ -174,6 +179,12 @@ jobs:
           echo "value=$flag" >> "$GITHUB_OUTPUT"
           echo "MADEIRA_BUILD_I386=$flag" >> "$GITHUB_ENV"
           echo "32-bit PE set: MADEIRA_BUILD_I386=$flag"
+
+      - name: Download Metal toolchain component
+        # Mirrors upstream's jobs: DXMT's Metal shader compile needs the Metal
+        # toolchain component, and the Xcode 27 atomic fix it applies.
+        run: |
+          xcodebuild -downloadComponent MetalToolchain
 
       - name: Run build-ipa.sh
         run: |
