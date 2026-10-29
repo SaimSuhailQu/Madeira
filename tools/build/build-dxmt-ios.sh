@@ -4,8 +4,9 @@ ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BUILD="$ROOT/build/dxmt-ios"
 OUT="$ROOT/app/Madeira/libdxmt_combined.a"
 
-if [[ -f "$OUT" ]]; then
-  echo "DXMT iOS: cached"
+# CI's cache key includes DXMT, Wine, LLVM and the native build inputs.
+if [[ "${GITHUB_ACTIONS:-}" == true && -s "$OUT" ]]; then
+  echo "Using the input-matched DXMT iOS cache"
   exit 0
 fi
 

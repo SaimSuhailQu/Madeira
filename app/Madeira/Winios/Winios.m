@@ -22,6 +22,7 @@
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
+#include "WiniosCursor.h"
 #import <os/log.h>
 #include <stdarg.h>
 #include <pthread.h>
@@ -35,6 +36,7 @@
 /* The window census struct is shared with Swift through this header;
  * including it here keeps both sides' definitions the same. */
 #include "Winios.h"
+#include "VulkanLayerGeometry.h"
 
 /* csops syscall — CS_DEBUGGED is the flag StikDebug JIT rides on. Declared by
  * hand for the same reason JITAllocator.c does: <sys/codesign.h> is not in the
@@ -448,6 +450,7 @@ BOOL winios_pCreateWindow(HWND hwnd) {
 #define WINIOS_SWAP_HWNDS 32
 #define WINIOS_SWAP_KINDS 8   /* style, pos-begin, pos, activate (driver_ios.c); show, layer (here) */
 static _Atomic(uintptr_t) g_swap_hwnds[WINIOS_SWAP_HWNDS];
+static _Atomic(uintptr_t) g_size_game_hwnd;
 static _Atomic unsigned g_swap_said[WINIOS_SWAP_HWNDS][WINIOS_SWAP_KINDS];
 enum { WINIOS_SWAP_SHOW = 4, WINIOS_SWAP_LAYER = 5 };
 
@@ -524,11 +527,19 @@ static void winios_remove_layer(HWND hwnd);   /* compositor, below */
  * normal session never pays a lookup. */
 #define WINIOS_WS_VISIBLE    0x10000000u
 #define WINIOS_WS_MINIMIZE   0x20000000u
+#define WINIOS_WS_CAPTION    0x00C00000u   /* WS_BORDER | WS_DLGFRAME */
 
 extern int winios_drv_census_owner(HWND hwnd, unsigned int *pid, unsigned int *style);
 extern int winios_drv_process_image(unsigned int pid, char *out, unsigned int size);
 extern int winios_drv_post_restore(HWND hwnd);
 extern int winios_drv_foreground_if_owner(HWND hwnd);
+extern int winios_drv_close_desktop_if_owner(void);
+
+/* winios_close_desktop: the app asks explorer's desktop to close (a Dock
+ * session whose game and Steam have ended); the desktop's own thread does it
+ * from its event pump (winios_pProcessEvents). */
+static atomic_int g_close_desktop;
+void winios_close_desktop(void) { atomic_store(&g_close_desktop, 1); }
 
 /* A game's main window can be shown minimized the first time it is shown
  * (ShowWindow cmd 2, parked at -32000,-32000). On Windows the taskbar brings
@@ -624,6 +635,7 @@ static void winios_census_note_frame(HWND hwnd, int x, int y, int w, int h, int 
         e->x = x; e->y = y; e->w = w; e->h = h;
         e->pid = pid;
         e->visible = (unsigned char)shown;
+        e->caption = (style & WINIOS_WS_CAPTION) == WINIOS_WS_CAPTION;
         memcpy(e->image, image, sizeof(e->image));
         if (shown) e->shown_once = 1;
         else if ((style & WINIOS_WS_VISIBLE) && (style & WINIOS_WS_MINIMIZE) && !e->shown_once && !e->restore_sent &&
@@ -645,7 +657,7 @@ static void winios_census_note_frame(HWND hwnd, int x, int y, int w, int h, int 
 
 /* Wine thread, from the GDI flush: count frames of listed windows only. */
 static void winios_census_note_present(HWND hwnd) {
-    if (!atomic_load_explicit(&g_census_on, memory_order_relaxed)) return;
+    if (atomic_load_explicit(&g_census_on, memory_order_relaxed) != 1) return;
     pthread_mutex_lock(&g_census_lock);
     struct winios_census_window *e = winios_census_find(hwnd);
     if (e && e->presents < 0xffffffffu) e->presents++;
@@ -655,7 +667,7 @@ static void winios_census_note_present(HWND hwnd) {
 /* A desktop-mode swapchain was made for this window (any thread). A swapchain
  * on a child window is not listed; the app also watches DXMT's present count. */
 static void winios_census_note_metal(HWND hwnd) {
-    if (!atomic_load_explicit(&g_census_on, memory_order_relaxed)) return;
+    if (atomic_load_explicit(&g_census_on, memory_order_relaxed) != 1) return;
     pthread_mutex_lock(&g_census_lock);
     struct winios_census_window *e = winios_census_find(hwnd);
     if (e) e->metal = 1;
@@ -670,7 +682,35 @@ static void winios_census_forget(HWND hwnd) {
     pthread_mutex_unlock(&g_census_lock);
 }
 
+/* The census ends when the starting screen finds the game's window, often a
+ * splash or launcher window; the game's main window can be shown for the
+ * first time, minimized, after that. on=2 keeps restoring such windows until
+ * the session ends. MADEIRA_RESTORE_BORN_MINIMIZED_LATE=0 ends with the census,
+ * as before. */
+static int winios_restore_born_minimized_late_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) { const char *e = getenv("MADEIRA_RESTORE_BORN_MINIMIZED_LATE"); enabled = !(e && e[0] == '0'); }   /* 0: a window first shown minimized after a Dock start's starting screen has ended stays minimized */
+    return enabled;
+}
+
 void winios_window_census_enable(int on) {
+    if (on == 2) {
+        pthread_mutex_lock(&g_census_lock);
+        int was = atomic_load(&g_census_on);
+        int keep = was != 0 && winios_restore_born_minimized_enabled() && winios_restore_born_minimized_late_enabled();
+        if (!keep) {
+            g_census_n = 0;
+            g_census_images_n = 0;
+            memset(g_census, 0, sizeof(g_census));
+        }
+        atomic_store(&g_census_on, keep ? 2 : 0);
+        pthread_mutex_unlock(&g_census_lock);
+        if (was) {
+            fprintf(stderr, "[window-census] %s\n", keep ? "off (restoring windows first shown minimized until the session ends)" : "off");
+            fflush(stderr);
+        }
+        return;
+    }
     pthread_mutex_lock(&g_census_lock);
     int was = atomic_load(&g_census_on);
     g_census_n = 0;
@@ -697,6 +737,8 @@ void winios_pDestroyWindow(HWND hwnd) {
     WLOG("pDestroyWindow hwnd=%p", hwnd);
     uintptr_t pending = (uintptr_t)hwnd;
     atomic_compare_exchange_strong(&g_restore_foreground, &pending, 0);
+    pending = (uintptr_t)hwnd;
+    atomic_compare_exchange_strong(&g_size_game_hwnd, &pending, 0);
     winios_census_forget(hwnd);
     if (winios_forget_swapchain_hwnd(hwnd)) {   /* madeira-bcd: [swap-win] */
         fprintf(stderr, "[swap-win] hwnd=%p destroyed (pDestroyWindow) while a swapchain had presented into it\n", hwnd);
@@ -801,12 +843,29 @@ void winios_pWindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 
 extern void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int mouse_data, void *hwnd);
 extern void winios_drv_post_key(unsigned short vk, unsigned int flags);
+extern void winios_drv_post_text(unsigned int scalar, unsigned short vk, int shift);
 extern void winios_dump_window_tree(void);
 extern void ios_dump_all_thread_stacks(void);
+extern int winios_drv_size_game_window(void *hwnd, int width, int height);
+extern void winios_screen_size(int *w, int *h);
+
+/* MADEIRA_DIRECT_WINDOW_SIZE=1: keep an opted-in presenting window's client
+ * at the selected resolution, including an engine resize after startup.
+ * Default off; desktop sessions and ordinary windowed games are unchanged. */
+static void winios_request_game_size(void *hwnd, int cw, int ch) {
+    const char *size = getenv("MADEIRA_DIRECT_WINDOW_SIZE");
+    const char *desktop = getenv("MADEIRA_DESKTOP");
+    if (!size || strcmp(size, "1") || (desktop && desktop[0] == '1') || !winios_swapchain_hwnd(hwnd)) return;
+    int width, height;
+    winios_screen_size(&width, &height);
+    if (width > 0 && height > 0 && (cw != width || ch != height))
+        atomic_store(&g_size_game_hwnd, (uintptr_t)hwnd);
+}
 
 #define WINIOS_RING_SIZE 256
 #define WINIOS_EV_MOUSE 0
 #define WINIOS_EV_KEY   1
+#define WINIOS_EV_TEXT  2
 #define KEYEVENTF_KEYUP 0x0002
 typedef struct {
     unsigned int type;       /* WINIOS_EV_MOUSE / WINIOS_EV_KEY */
@@ -821,6 +880,42 @@ static struct {
     unsigned int tail;       /* consumer cursor (Wine drain) */
     pthread_mutex_t lock;
 } g_input_q = { .lock = PTHREAD_MUTEX_INITIALIZER };
+
+static _Atomic unsigned int g_text_generation;
+/* One consumer owns delivery order across concurrent Wine event pumps. */
+static pthread_mutex_t g_input_drain_lock = PTHREAD_MUTEX_INITIALIZER;
+static double g_text_ready_at;
+static unsigned int g_text_paced_generation;
+
+int winios_try_post_text(unsigned int scalar, int vk, int shift, int interval_ms) {
+    if (interval_ms < 5) interval_ms = 5;
+    if (interval_ms > 100) interval_ms = 100;
+    int accepted = 0;
+    pthread_mutex_lock(&g_input_q.lock);
+    unsigned int used = (g_input_q.head + WINIOS_RING_SIZE - g_input_q.tail) % WINIOS_RING_SIZE;
+    /* Leave room for physical key/button releases while the game is busy. */
+    if (used < WINIOS_RING_SIZE - 16) {
+        g_input_q.buf[g_input_q.head] = (winios_input_event_t){
+            WINIOS_EV_TEXT, (int)scalar, vk, ((unsigned int)interval_ms << 8) | (shift != 0),
+            atomic_load(&g_text_generation)
+        };
+        g_input_q.head = (g_input_q.head + 1) % WINIOS_RING_SIZE;
+        accepted = 1;
+    }
+    pthread_mutex_unlock(&g_input_q.lock);
+    return accepted;
+}
+
+void winios_cancel_text(void) {
+    atomic_fetch_add(&g_text_generation, 1);
+}
+
+static int winios_drain_text(const winios_input_event_t *e) {
+    if (e->type != WINIOS_EV_TEXT) return 0;
+    if (e->data == atomic_load(&g_text_generation))
+        winios_drv_post_text((unsigned int)e->x, (unsigned short)e->y, (e->flags & 1) != 0);
+    return 1;
+}
 
 static void winios_q_push_ev(unsigned int type, int x, int y, unsigned int flags, unsigned int data) {
     pthread_mutex_lock(&g_input_q.lock);
@@ -864,11 +959,63 @@ void winios_post_touch_up(int x, int y) {
 /* Key press bridge. vk = Windows virtual-key code, down = 1 for press,
  * 0 for release. Queued like mouse events; drained in pProcessEvents. */
 void winios_post_key(int vk, int down) {
-    fprintf(stderr, "[winios] post_key vk=0x%x down=%d\n", vk, down); fflush(stderr);
     winios_q_push_ev(WINIOS_EV_KEY, vk, 0, down ? 0 : KEYEVENTF_KEYUP, 0);
 }
 
+/* Serial, nonblocking consumer: keys remain FIFO even with several Wine
+ * threads polling at once. Only the queue owner injects into wineserver. */
+static BOOL winios_drain_input(void) {
+    if (pthread_mutex_trylock(&g_input_drain_lock)) return FALSE;
+    BOOL drained = FALSE;
+    for (;;) {
+        winios_input_event_t e;
+        pthread_mutex_lock(&g_input_q.lock);
+        if (g_input_q.tail == g_input_q.head) {
+            pthread_mutex_unlock(&g_input_q.lock);
+            break;
+        }
+        e = g_input_q.buf[g_input_q.tail];
+        if (e.type == WINIOS_EV_TEXT && e.data == atomic_load(&g_text_generation)
+            && e.data == g_text_paced_generation && CACurrentMediaTime() < g_text_ready_at) {
+            pthread_mutex_unlock(&g_input_q.lock);
+            break; /* Never catch up a delayed queue as a burst of keystrokes. */
+        }
+        g_input_q.tail = (g_input_q.tail + 1) % WINIOS_RING_SIZE;
+        pthread_mutex_unlock(&g_input_q.lock);
+
+        if (winios_drain_text(&e)) {
+            if (e.data == atomic_load(&g_text_generation)) {
+                g_text_paced_generation = e.data;
+                g_text_ready_at = CACurrentMediaTime() + (e.flags >> 8) / 1000.0;
+            }
+            drained = TRUE;
+            continue; /* Clipboard contents must not enter the input log. */
+        }
+        if (e.type != WINIOS_EV_KEY) {
+            fprintf(stderr, "[winios] drain type=%u x=%d y=%d flags=0x%x\n", e.type, e.x, e.y, e.flags); fflush(stderr);
+        }
+        if (e.type == WINIOS_EV_KEY)
+            winios_drv_post_key((unsigned short)e.x, e.flags);
+        else
+            winios_drv_post_mouse(e.x, e.y, e.flags, e.data, NULL);
+        drained = TRUE;
+    }
+    pthread_mutex_unlock(&g_input_drain_lock);
+    return drained;
+}
+
 BOOL winios_pProcessEvents(DWORD mask) {
+    uintptr_t size_hwnd = atomic_exchange(&g_size_game_hwnd, 0);
+    if (size_hwnd) {
+        int width, height;
+        winios_screen_size(&width, &height);
+        /* The owner thread may dispatch WM_SIZE here, after swapchain creation
+         * has returned. Other event-pump threads leave the request pending. */
+        if (!winios_drv_size_game_window((void *)size_hwnd, width, height)) {
+            uintptr_t empty = 0;
+            atomic_compare_exchange_strong(&g_size_game_hwnd, &empty, size_hwnd);
+        }
+    }
     /* The restored born-minimized window's own thread brings it to the front
      * (see g_restore_foreground); other threads leave the request in place. */
     uintptr_t fg = atomic_load_explicit(&g_restore_foreground, memory_order_relaxed);
@@ -876,6 +1023,14 @@ BOOL winios_pProcessEvents(DWORD mask) {
         int r = winios_drv_foreground_if_owner((HWND)fg);
         if (r && atomic_compare_exchange_strong(&g_restore_foreground, &fg, 0)) {
             fprintf(stderr, "[born-minimized] hwnd=%p foreground=%d\n", (HWND)fg, r);
+            fflush(stderr);
+        }
+    }
+    if (atomic_load_explicit(&g_close_desktop, memory_order_relaxed)) {
+        int r = winios_drv_close_desktop_if_owner();
+        int expected = 1;
+        if (r && atomic_compare_exchange_strong(&g_close_desktop, &expected, 0)) {
+            fprintf(stderr, "[winios] desktop close posted=%d (the Dock session ends)\n", r);
             fflush(stderr);
         }
     }
@@ -897,26 +1052,7 @@ BOOL winios_pProcessEvents(DWORD mask) {
             winios_dump_window_tree();
         }
     }
-    BOOL drained = FALSE;
-    for (;;) {
-        winios_input_event_t e;
-        pthread_mutex_lock(&g_input_q.lock);
-        if (g_input_q.tail == g_input_q.head) {
-            pthread_mutex_unlock(&g_input_q.lock);
-            break;
-        }
-        e = g_input_q.buf[g_input_q.tail];
-        g_input_q.tail = (g_input_q.tail + 1) % WINIOS_RING_SIZE;
-        pthread_mutex_unlock(&g_input_q.lock);
-
-        fprintf(stderr, "[winios] drain type=%u x=%d y=%d flags=0x%x\n", e.type, e.x, e.y, e.flags); fflush(stderr);
-        if (e.type == WINIOS_EV_KEY)
-            winios_drv_post_key((unsigned short)e.x, e.flags);
-        else
-            winios_drv_post_mouse(e.x, e.y, e.flags, e.data, NULL);
-        drained = TRUE;
-    }
-    return drained;
+    return winios_drain_input();
 }
 
 /* ============================================================ *
@@ -936,8 +1072,11 @@ BOOL winios_pProcessEvents(DWORD mask) {
 static NSMutableDictionary<NSNumber *, CALayer *> *g_layers;
 static NSMutableDictionary<NSNumber *, NSValue *> *g_px_rects;  /* hwnd → last px rect */
 static NSMutableDictionary<NSNumber *, NSValue *> *g_surf_sizes; /* hwnd → surface px size */
-static NSMutableDictionary<NSNumber *, CAMetalLayer *> *g_metal_layers; /* hwnd → DXMT layer */
+static NSMutableDictionary<NSNumber *, CAMetalLayer *> *g_metal_layers; /* hwnd → Metal layer */
+static NSHashTable<CAMetalLayer *> *g_vulkan_layers; /* weak identities; main thread only */
 static NSMutableDictionary<NSNumber *, NSValue *> *g_client_rects;      /* hwnd → client px rect */
+static NSNumber *g_game_input_key;       /* HWND using the fullscreen game layer */
+static BOOL g_game_input_hidden;
 /* Desktop fit state (winios_desktop_fit below), main thread only. */
 static NSNumber *g_fit_key;
 static CGRect g_fit_client_px;   /* the window's client rect, desktop px */
@@ -1001,6 +1140,9 @@ static void winios_layout_compositor(void) {
     UIWindow *win = g_compositor_view.superview ? (UIWindow *)g_compositor_view.superview : nil;
     CGRect frame = g_comp_frame_set ? g_comp_frame : (win ? win.bounds : g_compositor_view.frame);
     g_compositor_view.frame = frame;
+    /* madeira-compositor-stay-on-top: a view controller presented after the first present adds its
+     * transition view above us; the desktop would be drawn and invisible. */
+    if (win) [win bringSubviewToFront:g_compositor_view];
 
     /* The LIVE guest size, not MADEIRA_SCREEN_W/H. That environment pair is
      * the session's launch-time seed; win32u owns the value afterwards and
@@ -1076,6 +1218,7 @@ void winios_set_compositor_frame(double x, double y, double w, double h) {
  * the session ended, so the library hides it then and shows it again for the
  * next session. Returns 1 when there was a view to change. */
 int winios_compositor_set_hidden(int hidden) {
+    if (hidden) dispatch_async(dispatch_get_main_queue(), ^{ g_game_input_key = nil; });
     if (!g_compositor_view) return 0;
     if (g_comp_game) {   /* an ended game session's windows go away */
         if (!hidden) return 0;
@@ -1165,6 +1308,7 @@ static void winios_game_cursor_refresh(void);   /* cursor section, below */
 
 /* main thread only. Removes the compositor view and every window layer. */
 static void winios_drop_compositor(const char *why) {
+    g_game_input_key = nil;
     if (!g_compositor_view) return;
     winios_forget_cursor_layer();
     for (CALayer *l in g_layers.allValues) [l removeFromSuperlayer];
@@ -1204,8 +1348,13 @@ static BOOL winios_game_window_shown(NSNumber *key) {
 /* Called by IOSDisplayShim on a wine thread when a swapchain (D3D9/11/12)
  * takes the game layer for an HWND in a game session. */
 void winios_note_game_metal_hwnd(void *hwnd) {
+    winios_request_game_size(hwnd, 0, 0);
     dispatch_async(dispatch_get_main_queue(), ^{
         NSNumber *key = @((uintptr_t)hwnd);
+        if (![g_game_input_key isEqual:key]) {
+            g_game_input_key = key;
+            g_game_input_hidden = NO;
+        }
         if (!g_game_metal) g_game_metal = [NSMutableSet new];
         if ([g_game_metal containsObject:key]) return;
         [g_game_metal addObject:key];
@@ -1218,8 +1367,11 @@ void winios_note_game_metal_hwnd(void *hwnd) {
 /* Called at every Wine session start (WineProcessBridge): a game session
  * starts with no overlay windows and no known Metal windows. */
 void winios_session_reset(void) {
+    atomic_store(&g_size_game_hwnd, 0);
+    atomic_store(&g_close_desktop, 0);
     winios_swapchain_hwnds_reset();   /* [swap-win]: HWND values of the last session mean nothing now */
     dispatch_async(dispatch_get_main_queue(), ^{
+        g_game_input_key = nil;
         [g_game_metal removeAllObjects];
         if (g_comp_game) winios_drop_compositor("new session");
         winios_metal_hud_pick();   /* the window-level layer's HUD follows the session kind */
@@ -1339,8 +1491,11 @@ static CALayer *winios_layer_for(HWND hwnd, bool create) {
 
 static void winios_remove_layer(HWND hwnd) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_layers) return;
         NSNumber *key = @((uintptr_t)hwnd);
+        if ([g_game_input_key isEqual:key]) g_game_input_key = nil;
+        [g_game_metal removeObject:key];
+        [g_client_rects removeObjectForKey:key];
+        if (!g_layers) return;
         CALayer *l = g_layers[key];
         if (l) {
             [l removeFromSuperlayer];
@@ -1432,10 +1587,13 @@ static void winios_place_metal_layer(NSNumber *key) {
     if (!wv || !cv) return;
     CGRect w = wv.CGRectValue, c = cv.CGRectValue;
     CGFloat s = g_px_to_pt;
+    BOOL vulkan = [g_vulkan_layers containsObject:ml];
+    if (vulkan) ml.affineTransform = CGAffineTransformIdentity;
     ml.frame = CGRectMake((c.origin.x - w.origin.x) * s,
                           (c.origin.y - w.origin.y) * WINIOS_PX_TO_PT_Y,
                           c.size.width * s, c.size.height * WINIOS_PX_TO_PT_Y);
     winios_desktop_fit(key, ml, c);
+    if (vulkan) madeira_vulkan_layer_geometry(ml, ml.frame, c.size);
 }
 
 /* madeira-bcd: A HIDDEN WINDOW PRESENTS SLOWLY. A desktop window's swapchain
@@ -1661,10 +1819,35 @@ CAMetalLayer *winios_metal_layer_for_hwnd(void *hwnd) {
     return result;
 }
 
+/* Vulkan preserves the Wine client-pixel extent independently of the
+ * compositor's point placement. Do not change the DXMT-only layer path.
+ * Weak layer identities avoid carrying the Vulkan flag across HWND reuse. */
+CAMetalLayer *winios_vulkan_layer_for_hwnd(void *hwnd) {
+    __block CAMetalLayer *result = nil;
+    void (^make)(void) = ^{
+        CAMetalLayer *ml = winios_metal_layer_for_hwnd(hwnd);
+        if (!ml) return;
+        if (!g_vulkan_layers) g_vulkan_layers = [NSHashTable weakObjectsHashTable];
+        [g_vulkan_layers addObject:ml];
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        winios_place_metal_layer(@((uintptr_t)hwnd));
+        [CATransaction commit];
+        fprintf(stderr, "[vk-layer] hwnd=%p client=%.0fx%.0f point-frame=%.1fx%.1f scale=%.1f\n",
+                hwnd, ml.bounds.size.width, ml.bounds.size.height,
+                ml.frame.size.width, ml.frame.size.height, (double)ml.contentsScale);
+        result = ml;
+    };
+    if ([NSThread isMainThread]) make();
+    else dispatch_sync(dispatch_get_main_queue(), make);
+    return result;
+}
+
 /* Parent show/hide: update existing child layers on the same queue as frames.
  * A hidden child retains its surface and Metal layer for a later parent show. */
 void winios_window_visibility(HWND hwnd, int visible) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if ([g_game_input_key isEqual:@((uintptr_t)hwnd)]) g_game_input_hidden = !visible;
         CALayer *l = g_layers[@((uintptr_t)hwnd)];
         if (!l) return;
         BOOL hidden = !visible || CGRectIsEmpty(l.bounds);
@@ -1691,11 +1874,11 @@ void winios_window_geometry(HWND hwnd, int x, int y, int w, int h,
                             int cx, int cy, int cw, int ch) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSNumber *key = @((uintptr_t)hwnd);
+        if (!g_client_rects) g_client_rects = [NSMutableDictionary new];
+        g_client_rects[key] = [NSValue valueWithCGRect:CGRectMake(cx, cy, cw, ch)];
         CALayer *l = g_layers[key];
         if (!l) return;
         g_px_rects[key] = [NSValue valueWithCGRect:CGRectMake(x, y, w, h)];
-        if (!g_client_rects) g_client_rects = [NSMutableDictionary new];
-        g_client_rects[key] = [NSValue valueWithCGRect:CGRectMake(cx, cy, cw, ch)];
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         l.frame = winios_layer_rect(x, y, w, h);
@@ -1713,6 +1896,7 @@ void winios_window_geometry(HWND hwnd, int x, int y, int w, int h,
  * x/y/w/h = visible rect, cx/cy/cw/ch = client rect, screen desktop pixels. */
 void winios_window_frame(HWND hwnd, int x, int y, int w, int h, int visible,
                          int cx, int cy, int cw, int ch) {
+    winios_request_game_size(hwnd, cw, ch);
     /* Here, not in the block below: the census asks win32u about the window,
      * which needs this Wine thread. No-op unless the app turned it on. */
     winios_census_note_frame(hwnd, x, y, w, h, visible);
@@ -1720,14 +1904,15 @@ void winios_window_frame(HWND hwnd, int x, int y, int w, int h, int visible,
         winios_ensure_compositor();
         if (!g_compositor_view) return;
         NSNumber *key = @((uintptr_t)hwnd);
+        if (!g_client_rects) g_client_rects = [NSMutableDictionary new];
+        g_client_rects[key] = [NSValue valueWithCGRect:CGRectMake(cx, cy, cw, ch)];
+        if ([g_game_input_key isEqual:key]) g_game_input_hidden = !visible;
         if (g_comp_game) {   /* game-mode windows, see winios_game_window_shown */
             g_px_rects[key] = [NSValue valueWithCGRect:CGRectMake(x, y, w, h)];
             if (!winios_game_window_shown(key)) return;
         }
         CALayer *l = winios_layer_for(hwnd, true);
         g_px_rects[key] = [NSValue valueWithCGRect:CGRectMake(x, y, w, h)];
-        if (!g_client_rects) g_client_rects = [NSMutableDictionary new];
-        g_client_rects[key] = [NSValue valueWithCGRect:CGRectMake(cx, cy, cw, ch)];
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         l.frame = winios_layer_rect(x, y, w, h);
@@ -2369,6 +2554,8 @@ void winios_cursor_set(unsigned int cur_id, int w, int h, int hot_x, int hot_y, 
 }
 
 void winios_cursor_show(int show) {
+    if (winios_mouse_routing_enabled())
+        winios_direct_cursor_show(show); // Desktop mouse-routing metadata.
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_comp_game) {   /* the dialog cursor shows only over a dialog */
             g_game_cursor_prog_hidden = !show;
@@ -2388,6 +2575,23 @@ static BOOL winios_game_dialog_visible(void) {
     for (CALayer *l in g_layers.allValues)
         if (!l.hidden && CGRectIntersectsRect(l.frame, view)) return YES;
     return NO;
+}
+
+/* Main thread. The fullscreen Metal layer can show a swapchain whose HWND
+ * has a smaller client area than the virtual monitor. Input and the cursor
+ * must use that client area's screen coordinates, not the backbuffer size.
+ * A launcher/message box still uses its normal desktop coordinates. */
+int winios_game_client_rect(int *x, int *y, int *w, int *h) {
+    if (winios_desktop_session() || !g_game_input_key || g_game_input_hidden || winios_game_dialog_visible()) return 0;
+    NSValue *value = g_client_rects[g_game_input_key];
+    if (!value) return 0;
+    CGRect rect = value.CGRectValue;
+    if (rect.size.width <= 0 || rect.size.height <= 0) return 0;
+    if (x) *x = (int)rect.origin.x;
+    if (y) *y = (int)rect.origin.y;
+    if (w) *w = (int)rect.size.width;
+    if (h) *h = (int)rect.size.height;
+    return 1;
 }
 
 /* main thread only: the game-mode cursor is drawn while a dialog is on screen,

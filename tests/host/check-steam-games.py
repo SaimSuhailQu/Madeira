@@ -78,7 +78,7 @@ require('SteamEntrySection(entry: $entry)' in detail and 'if entry.steamAppID !=
         'Game details: the Steam section for a Steam game')
 for label in ['"Start with"', '"Madeira Dock"', '"Smaller JIT pool (512 MB) for this launch"', '"One-time installs"',
               '"Run at next start"', '"Skip"', '"Repair installed files"', '"Uninstall"', '"App ID"',
-              '"Free space on this device"', '"Pause update"', '"Resume update"', '"The game"', '"Program"', '"Choose…"']:
+              '"Free space where the game is installed"', '"Pause update"', '"Resume update"', '"The game"', '"Program"', '"Choose…"']:
     require(label in steam_section, f'Steam section: {label}')
 for label in ['"Library details"', '"Choose cover image"', '"Use Steam artwork"', '"Display"', '"Resolution"',
               '"Aspect & scaling"', '"Compatibility & performance"', '"Reduced-precision x87"', '"CPU cores reported"',
@@ -101,8 +101,10 @@ require('@ViewBuilder private func pills(_ status: SteamGamesRules.Status, _ ent
         "an installed game's card shows the library pills (and Update), any other state its own pill, in all three "
         "layouts (dense list, list, grid); no Dock or Steam pill")
 badges = library[library.index('struct LibraryBadges: View {'):library.index('struct LibraryStatus: View {')]
-require(badges.index('badge("\\(entry.bits)-bit")') < badges.index('LibraryRendererBadge.compact(entry.graphicsAPI)') <
-        badges.index('if let note { badge(note) }') < badges.index('private var size'),
+# The pills' texts are one rule (LibraryBadges.formatTexts, also the zoomable grid's measured labels).
+require(badges.index('texts.append("\\(entry.bits)-bit")') < badges.index('LibraryRendererBadge.compact(entry.graphicsAPI)') <
+        badges.index('if let note { texts.append(note) }') and
+        badges.index('ForEach(Self.formatTexts(entry, note: note)') < badges.index('private var size'),
         'the pills in order: bits, graphics API, Update, then the size')
 require('await library.refreshSteamMetadata(game, title: item.name)' in cell and 'if status.showsFormat, let game = item.installed' in cell,
         "an installed game's card reads its format through its library entry")
@@ -122,11 +124,11 @@ require('stored?.steamProgramSource == "choice" ? stored?.steamProgram : nil' in
         'LibraryMetadataScanner.shared.scan(program.url, drive: drive, countBytes: false)' in steam_meta,
         'the program is the one "The game" starts; bits from its PE header, the API as for any library game')
 require(steam_meta.count('Task.detached(priority: .utility)') == 3 and 'updated.folderBytes = record.size ?? updated.folderBytes' in steam_meta
-        and 'guard !Task.isCancelled else { return }' in steam_meta and 'save(updated)' in steam_meta,
+        and 'guard !Task.isCancelled else { return }' in steam_meta and 'landSteamMetadata(updated)' in steam_meta,
         "file reads off the main thread; the size is the install record's; the result is kept on the game's entry")
 require('LogStore.shared.log("[steam-games] metadata app=\\(game.id) bits=\\(updated.bits) api=\\(api ?? "unknown")")' in steam_meta
         and steam_meta.count('LogStore') == 1, '[steam-games] metadata logs the App ID, bits and API only')
-save_body = library[library.index('    func save(_ entry: LibraryEntry) {'):library.index('    func remove(_ id: UUID) {')]
+save_body = library[library.index('    func save(_ entry: LibraryEntry, metadata: Bool = false) {'):library.index('    func remove(_ id: UUID) {')]
 require('next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID })' in save_body and
         'entry.bits = next[i].bits; entry.steamMetadataInstall = next[i].steamMetadataInstall' in save_body,
         "a Steam game keeps one entry, and a details page saved later keeps the card's newer format")
@@ -189,6 +191,7 @@ head = dock[dock.index('enum DockPerformancePolicy {'):dock.index('enum MadeiraD
 body = (dock[dock.index('enum MadeiraDock {'):dock.index('    @MainActor private static var lastReport =')] +
         dock[dock.index("    /// The host's environment for one launch."):])
 stubs = r'''
+enum ExternalDrives { static var steamLibraries: [String] { [] } }
 import Foundation
 #if canImport(Glibc)
 import Glibc
@@ -199,6 +202,12 @@ enum SteamSignIn {
     static func flag(_ name: String, default fallback: Bool) -> Bool { getenv(name).map { String(cString: $0) != "0" } ?? fallback }
 }
 enum SteamLog { static func event(_ m: String) {}; static func trace(_ m: @autoclosure () -> String) {} }
+// SteamLanguage (SteamAppInfo.swift) reads and writes the madeira.cfg language key.
+enum MadeiraConfig {
+    static func get(_ key: String) -> String? { nil }
+    static func set(_ key: String, _ value: String?) {}
+    static func gameValue(_ key: String) -> String? { nil }
+}
 enum SteamRuntimeFiles {
     static let relativeRoot = "Program Files (x86)/Steam"
     static let windowsRoot = "C:\\Program Files (x86)\\Steam"
@@ -471,7 +480,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-steam-games-') as tmp:
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-sanitize=address', '-o', str(exe),
                             str(tmp / 'stubs.swift'), str(tmp / 'dock.swift'), str(tmp / 'rules.swift'),
                             str(tmp / 'checks.swift'), str(tmp / 'owned.swift'), str(app / 'SteamKeyValues.swift'),
-                            str(app / 'SteamInstall.swift'), str(app / 'SwiftSteam/Library/SteamAppInfo.swift')],
+                            str(app / 'SteamInstall.swift'), str(app / 'ExternalStorage.swift'), str(app / 'SwiftSteam/Library/SteamAppInfo.swift')],
                            capture_output=True, text=True)
     require(build.returncode == 0, 'production Steam games rules and Dock discovery compile on the host')
     if build.returncode:

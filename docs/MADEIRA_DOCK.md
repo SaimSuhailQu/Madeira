@@ -99,6 +99,15 @@ library session. The sheet has:
    script has programs to run (see below): "Run at next start" or "Skip".
    A game starts at "Run at next start"; a start that runs its programs
    turns it to "Skip".
+6. **Steam starts.** "Steam's choice", or a program in the game's folder.
+   Madeira can start only one 32-bit program per session, so a game whose
+   32-bit launcher starts the game (Fallout: New Vegas) ends the session at
+   the launcher's Play. With a program chosen, the next Dock start, while no
+   session runs, keeps the program Steam's launch entry names beside it as
+   `<name>.madeira-launcher` and copies the chosen program in its place, so
+   Valve's client still starts the game and checks ownership. "Steam's
+   choice" puts the kept launcher back at the next start. Log lines:
+   `[dock-start-program]`.
 
 Tap a game. Dock is started with Steam's default launch option only; custom
 arguments are not supported.
@@ -271,8 +280,9 @@ a result before any game window means the game did not start).
 **Which window is the game's.** Winios keeps a census of the desktop's
 top-level windows while a Dock start's starting screen is up: per window,
 whether it is shown, its size, whether it has put a frame on screen (a GDI
-frame or a D3D swapchain of its own), and the owning process with its
-executable path, read once per process from the Wine server by process id.
+frame or a D3D swapchain of its own), whether it has a title bar
+(`WS_CAPTION`), and the owning process with its executable path, read once
+per process from the Wine server by process id.
 The app classes the owner by where the program lives on drive C, never by
 its name:
 
@@ -280,13 +290,16 @@ its name:
 |---|---|---|
 | under `C:\windows\` | helper | never the game: Wine's shell, services and console hosts, msiexec, and the Dock host itself |
 | under the Steam client's folder, outside its `steamapps` library | client | a shown, drawn dialog (240x120 or larger) may need the user |
-| anywhere else | other | the game's (or its own launcher's) once shown, drawn and 160x120 or larger |
+| anywhere else | other | the game's (or its own launcher's) once shown, drawn and 160x120 or larger; a smaller shown, drawn window with a title bar (the game's own message box) may need the user |
 | unreadable | unknown | the game's only when D3D frames reached the screen |
 
 A window first shown before the host started (its first report field,
 `probe-start-bits`) belongs to the one-time installs, which run before the
 host: it is never the game's, and a dialog of it may need the user (a failed
-installer can wait for OK). A window that may need the user and stays up for
+installer can wait for OK). A game that fails early can do the same with its
+own message box (Unity's "Failed to load il2cpp" is 179x114), smaller than a
+game window and than a dialog: its title bar tells it from a splash screen or
+a tool strip. A window that may need the user and stays up for
 2 s reveals the desktop; 4 s after it is gone the starting screen returns, at
 most six times. **Show desktop** reveals the desktop for good. The game's
 window ends the starting screen in every case. `[steam-launch-view]` logs the
@@ -300,6 +313,10 @@ show is minimized gets what a taskbar click sends, once: `WM_SYSCOMMAND` /
 `SC_RESTORE`, posted, and its own thread then brings it to the front from its
 event pump (a fullscreen game pauses without focus). A window that was shown
 and minimized itself later is left alone. `[born-minimized]` logs both steps.
+The starting screen often ends on a splash or launcher window, before the
+game's main window is shown at all, so the restore keeps running after the
+census ends (counting nothing else) until the session ends.
+`MADEIRA_RESTORE_BORN_MINIMIZED_LATE=0` ends it with the census, as before.
 
 The census runs only for a Dock start's starting screen: with it off, each
 hook costs one atomic load, and nothing else changes for any other session,
@@ -438,6 +455,7 @@ never asks. The preparation is Valve's; Dock does not touch the files.
 | `MADEIRA_DOCK_INSTALLER_REVEAL` | on | `0`: a one-time installer's dialog never reveals the desktop by itself |
 | `MADEIRA_DOCK_STATUS` | on | `0`: the starting screen does not watch the host's result |
 | `MADEIRA_RESTORE_BORN_MINIMIZED` | on | `0`: while the census runs, a window first shown minimized stays minimized |
+| `MADEIRA_RESTORE_BORN_MINIMIZED_LATE` | on | `0`: after the starting screen ends, a window first shown minimized stays minimized |
 
 ## 64-bit and runtime impact
 
@@ -529,6 +547,10 @@ credentials:
   switch), `madsync_enabled()` with the production `madeira_cfg.h`, and,
   where Windows `cmd.exe` is reachable, the batch run for real with stand-in
   installers and the staged `dockhost.exe --start-services`.
+- `check-dock-start-program.py`: "Steam starts" is applied before the
+  session with Steam's launch entry, Game details offers it, the file is in
+  the Xcode project, and (with Swift) the swap, the restore and refused paths
+  outside the game's folder.
 - `build/madeira-dock/build.sh --check`: Dock's own ASan/UBSan unit tests
   (transfer parsing, 2,000 malformed inputs, client selection, launch-result
   and callback bounds).
@@ -539,3 +561,20 @@ credentials:
   ASan/UBSan and ThreadSanitizer (top-level windows only, one path lookup per
   process, frames and swapchains, capacity, the born-minimized restore and its
   switch), the driver's path form, and the wiring and glyph row.
+
+## Launch arguments and ownership timing
+
+Game details passes the saved game arguments through
+`MADEIRA_STEAM_HOST_ARGUMENTS`. Dock appends them to the selected Steam launch
+option. Both the app and the host reject unbalanced unescaped quotes, control
+characters other than tabs, more than 64 arguments, and commands of 4096 bytes
+or more. Invalid arguments stop the host with code 54. Code 50 remains the
+offline sign-in result. Argument values do not appear in the host report.
+
+The host waits 500 ms after ownership setup by default. The developer override
+`MADEIRA_DOCK_LICENCE_WAIT_MS` accepts decimal values from 0 to
+30000. Invalid values keep the default. This changes timing only. Valve's
+client still checks the account and the game license.
+
+Rebuild the Dock host with these source changes. The source tests and the
+Windows cross-build do not establish Steam startup or gameplay on a device.

@@ -3,7 +3,10 @@ set -euo pipefail
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DERIVED="$ROOT/app/DerivedData"
 DIST="$ROOT/dist"
-APP="$DERIVED/Build/Products/Release-iphoneos/Madeira.app"
+# Debug is the configuration that runs games (docs/BUILDING.md); Release builds
+# have crashed the guest.
+CONFIGURATION="${CONFIGURATION:-Debug}"
+APP="$DERIVED/Build/Products/$CONFIGURATION-iphoneos/Madeira.app"
 
 required=(
   "$ROOT/FEX/build-ios/FEXCore/Source/libFEXCore.a"
@@ -14,18 +17,13 @@ required=(
   "$ROOT/app/Madeira/libntdll_unix.a"
   "$ROOT/app/Madeira/libwin32u_unix.a"
   "$ROOT/app/Madeira/libdxmt_combined.a"
+  "$ROOT/app/Madeira/libmadeira_rppairing.a"
 )
 for path in "${required[@]}"; do
   [[ -f "$path" ]] || { echo "ERROR: required build artifact missing: $path" >&2; exit 1; }
 done
 
-echo "=== Verifying libFEXCore_Base.a Allocator symbols before xcodebuild ==="
-if command -v nm >/dev/null; then
-  nm -gU "$ROOT/FEX/build-ios/FEXCore/Source/libFEXCore_Base.a" 2>/dev/null | grep 'Allocator.*memalign' || {
-    echo "ERROR: FEXCore::Allocator::memalign symbol missing from libFEXCore_Base.a" >&2
-    exit 1
-  }
-fi
+python3 "$ROOT/tools/build/runtime-components.py" verify all
 
 rm -rf "$DERIVED" "$DIST/Payload"
 mkdir -p "$DIST"
@@ -33,11 +31,11 @@ mkdir -p "$DIST"
 xcodebuild \
   -project "$ROOT/app/Madeira.xcodeproj" \
   -scheme Madeira \
-  -configuration Release \
+  -configuration "$CONFIGURATION" \
   -sdk iphoneos \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$DERIVED" \
-  IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+  IPHONEOS_DEPLOYMENT_TARGET=18.0 \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY='' \
@@ -45,21 +43,7 @@ xcodebuild \
 
 [[ -d "$APP" ]] || { echo "ERROR: xcodebuild succeeded but Madeira.app is missing" >&2; exit 1; }
 
-# Ship the optional 32-bit (WoW64) PE set when present
-if [[ -d "$ROOT/app/Madeira/i386-windows" ]]; then
-  echo "Bundling optional i386-windows (WoW64) PE set..."
-  ditto "$ROOT/app/Madeira/i386-windows" "$APP/i386-windows"
-fi
-
-if [[ -d "$ROOT/app/Madeira/d3d12" ]]; then
-  echo "Bundling D3D12 runtime support..."
-  ditto "$ROOT/app/Madeira/d3d12" "$APP/d3d12"
-fi
-
-if [[ -d "$ROOT/app/Madeira/x86_64-vcruntime" && ! -d "$APP/x86_64-vcruntime" ]]; then
-  echo "Bundling x86_64-vcruntime..."
-  ditto "$ROOT/app/Madeira/x86_64-vcruntime" "$APP/x86_64-vcruntime"
-fi
+python3 "$ROOT/tools/build/runtime-components.py" bundle "$APP"
 
 # Preserve Madeira's requested JIT/debug entitlements in the IPA. SideStore will
 # replace this ad-hoc signature with the user's development signature while
@@ -92,3 +76,4 @@ rm -f "$DIST/Madeira.ipa"
 rm -rf "$DIST/Payload"
 [[ -s "$DIST/Madeira.ipa" ]] || { echo "ERROR: failed to create IPA" >&2; exit 1; }
 unzip -tq "$DIST/Madeira.ipa" >/dev/null
+python3 "$ROOT/tools/build/runtime-components.py" ipa "$DIST/Madeira.ipa"

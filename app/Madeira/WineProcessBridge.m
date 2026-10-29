@@ -20,10 +20,12 @@
 #include <errno.h>
 #include <dirent.h>
 #include "../../build/madeira_cfg.h"   /* ml1095: one config file */
+#include "../../build/madeira_redact.h"   /* the arguments are logged with credential-like values redacted */
 #include <sys/stat.h>
 #include <pwd.h>
 #include <limits.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <sys/sysctl.h>
@@ -35,10 +37,55 @@
 #include "PrefixExtractor.h"
 #include "FEXBridge.h"  // fex_get_jit_write_offset()
 
+/* Write end of the pipe on fd 0, or -1 when stdin was left alone. The app's
+ * host writes the guest's keystrokes here. */
+int madeira_stdin_master = -1;
+/* madeira-stdout-pipe: read end of the guest's stdout, or -1 when the pipe is
+ * not enabled and stdout still goes to the shared log. */
+int madeira_stdout_master = -1;
+
+int madeira_stdout_is_open(void) { return madeira_stdout_master >= 0; }
+
+long madeira_stdout_read(void *buf, unsigned long len) {
+    if (madeira_stdout_master < 0 || !buf || !len) return -1;
+    return read(madeira_stdout_master, buf, (size_t)len);
+}
+
+long madeira_stdin_write(const void *buf, unsigned long len) {
+    if (madeira_stdin_master < 0) return -1;
+    return (long)write(madeira_stdin_master, buf, (size_t)len);
+}
+
+/* Whether the pipe exists. An accessor rather than letting callers read the
+ * global: it is written on the Wine thread and read from the UI thread, and
+ * Swift 6 refuses to import a mutable C global as concurrency-safe. */
+int madeira_stdin_is_open(void) {
+    return madeira_stdin_master >= 0;
+}
+
+/* Close the write end so the guest's stdin reaches EOF.
+ *
+ * Without this, anything that reads to EOF -- an interpreter fed a script,
+ * sort, the type/more family -- blocks forever after consuming what it was
+ * given. Combined with one-program-per-launch that costs the whole app launch,
+ * so the terminal must be able to signal "no more input". */
+void madeira_stdin_close(void) {
+    if (madeira_stdin_master < 0) return;
+    close(madeira_stdin_master);
+    madeira_stdin_master = -1;
+    dprintf(STDERR_FILENO, "[stdin-pipe] write end closed; guest stdin is at EOF\n");
+}
+
 // Thread-local globals for wine_ios_exit longjmp (used by wine_ios_exit.h shim in ntdll)
 // Each Wine "process" thread has its own jmpbuf so child processes can exit independently.
 _Thread_local jmp_buf wine_ios_exit_jmpbuf;
 _Thread_local volatile int wine_ios_exit_code = 0;
+
+/* Non-thread-local copy of the above, published when the Wine thread unwinds.
+ * Valid once wine_process_is_running() returns 0. */
+/* Not volatile: the atomics below provide the ordering, and volatile would
+ * only obscure that they are doing so. */
+static int g_wine_exit_code = 0;
 _Thread_local pthread_t wine_ios_main_thread;
 _Thread_local int wine_ios_exit_initialized = 0;
 
@@ -314,12 +361,26 @@ volatile int g_madeira_srv_log_all = 0;      /* env.MADEIRA_SRV_LOG_ALL = 1 */
  * logging. g_launch_exit holds (1 << 32) | status when the program ended with
  * an NTSTATUS error (0xC...), else 0. */
 static uint64_t g_launch_exit = 0;
+/* A game in a Madeira Dock session asked Steam to start another game
+ * (steam://run/<App ID>); ntdll's process gate (build/ntdll-unix/process_ios.c)
+ * refuses steam.exe and reports the App ID here. 0: none since the last reset. */
+static uint32_t g_steam_run_app = 0;
+void wine_steam_run_requested(unsigned int appid) {
+    __atomic_store_n(&g_steam_run_app, appid, __ATOMIC_RELEASE);
+}
+int wine_steam_run_request(uint32_t *appid) {
+    uint32_t value = __atomic_load_n(&g_steam_run_app, __ATOMIC_ACQUIRE);
+    if (!value) return 0;
+    if (appid) *appid = value;
+    return 1;
+}
 void wine_launched_process_did_exit(int status) {
     if ((uint32_t)status >= 0xC0000000u)
         __atomic_store_n(&g_launch_exit, (UINT64_C(1) << 32) | (uint32_t)status, __ATOMIC_RELEASE);
 }
 void wine_exit_status_reset(void) {
     __atomic_store_n(&g_launch_exit, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_steam_run_app, 0, __ATOMIC_RELEASE);
 }
 int wine_crash_exit_status(uint32_t *status) {
     uint64_t value = __atomic_load_n(&g_launch_exit, __ATOMIC_ACQUIRE);
@@ -339,6 +400,29 @@ static char *g_prefix_path = NULL;
  * env.MADEIRA_CFG_EARLY_DOCS = 0 in madeira.cfg. Pure C, host-tested
  * (tests/host/check-cfg-early-docs.py). */
 static const char *g_madeira_docs_early = "not-run";
+/* madeira-env-locked: MADEIRA_ENV_LOCKED is a comma-separated list of names
+ * the host set on purpose. Without it a madeira.cfg line -- or a library
+ * game's own config -- could replace the program the front end was asked to
+ * launch, and the user taps one thing while another starts, with nothing on
+ * screen to say so. The match is on the whole name between commas, so a lock
+ * on MADEIRA_EXE does not also catch MADEIRA_EXEC_FOO. Nothing is locked
+ * unless a host asks for it. */
+static int madeira_env_is_locked(const char *name)
+{
+    const char *locked = getenv("MADEIRA_ENV_LOCKED");
+    if (!locked || !*locked || !name || !*name) return 0;
+    size_t n = strlen(name);
+    for (const char *p = locked; *p; ) {
+        while (*p == ' ' || *p == ',') p++;
+        const char *start = p;
+        while (*p && *p != ',') p++;
+        const char *end = p;
+        while (end > start && end[-1] == ' ') end--;
+        if ((size_t)(end - start) == n && !strncmp(start, name, n)) return 1;
+    }
+    return 0;
+}
+
 static int madeira_cfg_off_word(const char *v)
 {
     return v && (!strcmp(v, "0") || !strcmp(v, "off") || !strcmp(v, "no"));
@@ -500,6 +584,9 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
  * target take exactly the code path they took before.
  * ========================================================================= */
 #define MADEIRA_IMAGE_FILE_MACHINE_I386 0x014c
+#define MADEIRA_IMAGE_FILE_MACHINE_AMD64 0x8664
+#define MADEIRA_IMAGE_FILE_MACHINE_ARM64 0xaa64
+#define MADEIRA_IMAGE_FILE_MACHINE_ARM64EC 0xa641
 
 /* build/ntdll-unix/virtual_ios.c: nonzero when this session's MAIN image is
  * 32-bit. The unix side reserves the process's guest window before its first
@@ -532,8 +619,7 @@ static uint16_t madeira_pe_machine(const char *unix_path)
  * known (the caller then treats the target as 64-bit, as before).
  *  - "C:\...\app.exe": the file under the prefix's drive_c.
  *  - a bare name: the launch resolves it as C:\windows\system32\<name>, which
- *    links the 64-bit farms, so a name present in a 64-bit farm is not probed
- *    any further. Otherwise it is looked up in the bundle's i386-windows. To
+ *    links the 64-bit farms; the first farm copy's PE header is probed. Otherwise it is looked up in the bundle's i386-windows. To
  *    launch the 32-bit build of a name both sets carry (explorer.exe, cmd.exe),
  *    give its full path, C:\windows\syswow64\<name>.
  *  - any other form (another drive, a relative Win32 path) is not probed. */
@@ -556,14 +642,30 @@ static uint16_t madeira_target_machine(const char *exe, const char *prefix, NSSt
     {
         for (size_t i = 0; i < sizeof(farms64) / sizeof(farms64[0]); i++)
         {
-            snprintf(probe, sizeof(probe), "%s/%s/%s", bundle.fileSystemRepresentation, farms64[i], exe);
-            if (access(probe, R_OK) == 0) return 0;
+            if (snprintf(probe, sizeof(probe), "%s/%s/%s", bundle.fileSystemRepresentation, farms64[i], exe)
+                    >= (int)sizeof(probe))
+                return 0;
+            if (access(probe, R_OK) == 0) return madeira_pe_machine(probe);
         }
         if (snprintf(probe, sizeof(probe), "%s/i386-windows/%s", bundle.fileSystemRepresentation, exe)
                 >= (int)sizeof(probe))
             return 0;
     }
     return madeira_pe_machine(probe);
+}
+
+/* Select the core by the executable's machine, not its spelling. The explicit
+ * force switch stays available; the i386 (WoW64) rule still takes precedence.
+ * Unknown or unreadable targets keep the original name/path heuristic. */
+static BOOL madeira_use_arm64ec_for_target(const char *exe, const char *force_ec,
+                                           uint16_t machine, BOOL has_i386_set)
+{
+    if (has_i386_set && machine == MADEIRA_IMAGE_FILE_MACHINE_I386) return NO;
+    if (force_ec && *force_ec == '1') return YES;
+    if (machine == MADEIRA_IMAGE_FILE_MACHINE_AMD64 || machine == MADEIRA_IMAGE_FILE_MACHINE_ARM64EC)
+        return YES;
+    if (machine == MADEIRA_IMAGE_FILE_MACHINE_ARM64) return NO;
+    return strstr(exe, "x64") != NULL || strchr(exe, '\\') != NULL;
 }
 
 /* The bundle carries the i386 Wine set. */
@@ -629,6 +731,258 @@ static void madeira_link_wbem(NSFileManager *fm, NSString *prefix, NSString *sys
 static void madeira_link_syswow64_wbem(NSFileManager *fm, NSString *prefix, NSString *bundle)
 {
     madeira_link_wbem(fm, prefix, @"syswow64", [bundle stringByAppendingPathComponent:@"i386-windows"]);
+}
+
+/* d3d9 = wined3d (madeira.cfg or the game's own lines; MADEIRA_D3D9=wined3d in
+ * the environment otherwise): this session's d3d9.dll is Wine's own frontend on
+ * wined3d's OpenGL renderer (opengl32 -> the winios WGL driver -> Zink on
+ * MoltenVK), not DXMT's. Unset, "emulated" and "native" keep DXMT's.
+ *
+ * The farms ship Wine's d3d9 as d3d9-wined3d.dll beside DXMT's d3d9.dll (ARM64EC
+ * for x64 programs, i386 for 32-bit ones). The links made for this session are
+ * re-pointed: system32\d3d9.dll when it names the ARM64EC DXMT file, sysx64\ and
+ * syswow64\d3d9.dll. Every session relinks the farms first, so the next session
+ * without the setting gets DXMT's again. No load-order override is needed: the
+ * iOS unix loader maps the PE file the link names (load_builtin in
+ * build/ntdll-unix/loader_ios.c returns STATUS_IMAGE_ALREADY_LOADED).
+ * wined3d.dll, d3d8.dll and ddraw.dll are Wine's in both farms already; d3d8 and
+ * ddraw always draw through wined3d. */
+static BOOL madeira_d3d9_wined3d_wanted(void)
+{
+    char v[32] = "";
+    const char *e;
+
+    if (madeira_cfg_get("d3d9", v, sizeof v) && v[0]) return !strcasecmp(v, "wined3d");
+    e = getenv("MADEIRA_D3D9");   /* the d3d9 key's value: emulated (default) or native = DXMT's i386 shim; wined3d = Wine's d3d9 on wined3d/OpenGL for 32- and 64-bit programs */
+    return e && !strcasecmp(e, "wined3d");
+}
+
+/* <dir>\d3d9.dll -> <farm>/d3d9-wined3d.dll. 1 linked, 0 link failed, -1 the farm has no such file. */
+static int madeira_link_d3d9_wined3d_in(NSFileManager *fm, NSString *dir, NSString *farm)
+{
+    NSString *src = [farm stringByAppendingPathComponent:@"d3d9-wined3d.dll"];
+    NSString *dst = [dir stringByAppendingPathComponent:@"d3d9.dll"];
+
+    if (access(src.fileSystemRepresentation, R_OK) != 0) return -1;
+    [fm removeItemAtPath:dst error:nil];
+    return [fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil] ? 1 : 0;
+}
+
+static void madeira_link_d3d9_wined3d(NSFileManager *fm, NSString *prefix, NSString *bundle, BOOL has_i386_set)
+{
+    NSString *win = [prefix stringByAppendingPathComponent:@"drive_c/windows"];
+    NSString *ec = [bundle stringByAppendingPathComponent:@"arm64ec-windows"];
+    NSString *sys32 = [win stringByAppendingPathComponent:@"system32"];
+    NSString *cur = [fm destinationOfSymbolicLinkAtPath:[sys32 stringByAppendingPathComponent:@"d3d9.dll"] error:nil];
+    const char *backend = getenv("MADEIRA_GL_BACKEND");
+    const char *extmax;
+    int s32 = -2, s64, s32wow = -2;
+
+    /* system32 holds the ARM64EC farm in an x64 session and, through the
+     * cross-link pass, in an ARM64 one whose farm has no d3d9.dll. */
+    if ([cur isEqualToString:[ec stringByAppendingPathComponent:@"d3d9.dll"]])
+        s32 = madeira_link_d3d9_wined3d_in(fm, sys32, ec);
+    s64 = madeira_link_d3d9_wined3d_in(fm, [win stringByAppendingPathComponent:@"sysx64"], ec);
+    if (has_i386_set)
+        s32wow = madeira_link_d3d9_wined3d_in(fm, [win stringByAppendingPathComponent:@"syswow64"],
+                                              [bundle stringByAppendingPathComponent:@"i386-windows"]);
+    setenv("MADEIRA_D3D9", "wined3d", 1);
+    /* wined3d asks for a context without a profile mask, gets a compatibility
+     * one and reads glGetString(GL_EXTENSIONS); the 3072-byte cut that 32-bit
+     * contexts get for engines that copy the string into a fixed buffer would
+     * hide extensions from it. overwrite=0: madeira.cfg can still set a limit. */
+    setenv("MADEIRA_GL_EXTENSIONS_MAX", "0", 0);
+    extmax = getenv("MADEIRA_GL_EXTENSIONS_MAX");   /* byte limit of GL_EXTENSIONS in 32-bit OpenGL contexts (opengl32, patches/wine-opengl-winios.patch): unset = 3072, 0 = none; d3d9 = wined3d makes it 0 unless set */
+    dprintf(STDERR_FILENO, "[WineProc] d3d9 = wined3d: Wine's d3d9 on wined3d/OpenGL (system32 %d, sysx64 %d, "
+            "syswow64 %d; 1 = linked, -1 = farm has no d3d9-wined3d.dll, -2 = not this session's), "
+            "MADEIRA_GL_BACKEND=%s, MADEIRA_GL_EXTENSIONS_MAX=%s\n", s32, s64, s32wow,
+            backend ? backend : "(unset)", extmax ? extmax : "(unset)");
+    if (!backend || strcmp(backend, "zink"))
+        dprintf(STDERR_FILENO, "[WineProc] d3d9 = wined3d needs desktop OpenGL (gl-backend = zink, the bundle's gl/ "
+                "folder); with OpenGL ES wined3d finds no usable context and Direct3DCreate9 returns NULL\n");
+}
+
+/* Vulkan, and vkd3d-proton as a second Direct3D 12 route (docs/BUILDING.md,
+ * "winevulkan and vkd3d-proton"). madeira.cfg, or the game's own lines:
+ *
+ *   vulkan = moltenvk | kosmickrisp | off | <path>.dylib
+ *            the Vulkan library winevulkan loads: gl/libMoltenVK.dylib (the one
+ *            Zink uses), gl/libvulkan_kosmickrisp.dylib, or a file named by path
+ *            (absolute, or relative to the app bundle). Unset: MoltenVK whenever
+ *            Vulkan is on.
+ *   d3d12  = vkd3d
+ *            this session's d3d12.dll and d3d12core.dll are vkd3d-proton's
+ *            (vulkan/arm64ec-windows in the bundle) instead of madeira-d3d12's.
+ *   d3d11  = dxvk
+ *            this session's d3d11.dll, d3d10core.dll and dxgi.dll are DXVK's
+ *            (vulkan/arm64ec-windows/dxvk-*.dll, build/dxvk/build.sh) instead of
+ *            DXMT's; docs/DXVK.md. DXVK's d3d11 needs its own dxgi, and DXMT's
+ *            dxgi is then gone, so Direct3D 12 must be vkd3d-proton (the usual
+ *            DXVK + vkd3d-proton pairing): with d3d12 unset this implies
+ *            d3d12 = vkd3d for the session.
+ *
+ * Vulkan is on for a session when `vulkan` names a library, d3d12 = vkd3d or
+ * d3d11 = dxvk.
+ * Off (the default) changes nothing: the prefix gets no vulkan-1.dll or
+ * winevulkan.dll (no farm holds them, so a program that probes for Vulkan
+ * finds none, as before), MADEIRA_VULKAN_LIBRARY stays unset, and win32u lists
+ * no Vulkan GPU (build/win32u-unix/vulkan_ios.c). On: MADEIRA_VULKAN_LIBRARY
+ * names the library and system32 (in an x64 session) and sysx64 get links to
+ * the ARM64EC vulkan-1.dll and winevulkan.dll; with d3d12 = vkd3d also to
+ * vkd3d-proton's d3d12.dll and d3d12core.dll, replacing the farm's links. Every
+ * session relinks the farms first, so the next session without the setting
+ * gets madeira-d3d12 again; the two Vulkan DLLs, which no farm relinks, are
+ * removed here when they name the bundle's vulkan folder. x64 programs only:
+ * the unix side binds no 32-bit table yet (build/ntdll-unix/virtual_ios.c). */
+static BOOL madeira_d3d11_dxvk_wanted(void)
+{
+    char v[32] = "";
+
+    return madeira_cfg_get("d3d11", v, sizeof v) && !strcasecmp(v, "dxvk");
+}
+
+/* d3d12 = vkd3d, or d3d12 unset with d3d11 = dxvk (DXVK's dxgi has no
+ * madeira-d3d12 swapchain; vkd3d-proton presents through it). */
+static BOOL madeira_d3d12_vkd3d_wanted(void)
+{
+    char v[32] = "";
+
+    if (madeira_cfg_get("d3d12", v, sizeof v) && v[0]) return !strcasecmp(v, "vkd3d");
+    return madeira_d3d11_dxvk_wanted();
+}
+
+/* The Vulkan library for this session, or nil when Vulkan stays off. */
+extern int madeira_vulkan_static_available(void);
+
+static NSString *madeira_vulkan_library(NSString *bundle)
+{
+    char v[512] = "";
+    BOOL set = madeira_cfg_get("vulkan", v, sizeof v) && v[0];
+
+    if (set && (!strcasecmp(v, "off") || !strcmp(v, "0"))) return nil;
+    if (!set && !madeira_d3d12_vkd3d_wanted() && !madeira_d3d11_dxvk_wanted()) return nil;
+    if (set && (!strcasecmp(v, "static") || !strcmp(v, "1")))
+        return madeira_vulkan_static_available() ? @"madeira-static-moltenvk" : nil;
+    if (!set || !strcasecmp(v, "moltenvk"))
+        return [bundle stringByAppendingPathComponent:@"gl/libMoltenVK.dylib"];
+    if (!strcasecmp(v, "kosmickrisp"))
+        return [bundle stringByAppendingPathComponent:@"gl/libvulkan_kosmickrisp.dylib"];
+    if (strchr(v, '/'))
+        return v[0] == '/' ? [NSString stringWithUTF8String:v]
+                           : [bundle stringByAppendingPathComponent:[NSString stringWithUTF8String:v]];
+    dprintf(STDERR_FILENO, "[vulkan] unknown madeira.cfg vulkan = %s (moltenvk, kosmickrisp, off or a .dylib path); "
+            "using MoltenVK\n", v);
+    return [bundle stringByAppendingPathComponent:@"gl/libMoltenVK.dylib"];
+}
+
+/* <dir>\<name> -> <src>. 1 linked, 0 failed. */
+static int madeira_link_vulkan_file(NSFileManager *fm, NSString *dir, NSString *name, NSString *src)
+{
+    NSString *dst = [dir stringByAppendingPathComponent:name];
+
+    [fm removeItemAtPath:dst error:nil];
+    return [fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil] ? 1 : 0;
+}
+
+static void madeira_setup_vulkan(NSFileManager *fm, NSString *prefix, NSString *bundle, BOOL use_arm64ec)
+{
+    NSString *win = [prefix stringByAppendingPathComponent:@"drive_c/windows"];
+    NSString *stack = [bundle stringByAppendingPathComponent:@"vulkan/arm64ec-windows"];
+    NSArray<NSString *> *vulkan_dlls = @[@"winevulkan.dll", @"vulkan-1.dll"];
+    NSArray<NSString *> *vkd3d_dlls = @[@"d3d12.dll", @"d3d12core.dll"];
+    /* Link names in the prefix; DXVK's files are dxvk-<name> in the vulkan folder. */
+    NSArray<NSString *> *dxvk_dlls = @[@"d3d11.dll", @"d3d10core.dll", @"dxgi.dll"];
+    NSArray<NSString *> *dirs = use_arm64ec ? @[@"system32", @"sysx64"] : @[@"sysx64"];
+    NSString *lib = madeira_vulkan_library(bundle);
+    BOOL vkd3d = madeira_d3d12_vkd3d_wanted();
+    BOOL dxvk = madeira_d3d11_dxvk_wanted();
+    int linked = 0, vkd3d_linked = 0, dxvk_linked = 0;
+
+    /* A previous session's Vulkan links (no farm pass replaces these two). */
+    for (NSString *dir in @[@"system32", @"sysx64"])
+        for (NSString *dll in vulkan_dlls) {
+            NSString *path = [[win stringByAppendingPathComponent:dir] stringByAppendingPathComponent:dll];
+            NSString *dest = [fm destinationOfSymbolicLinkAtPath:path error:nil];
+            if (dest && [dest rangeOfString:@"/vulkan/arm64ec-windows/"].location != NSNotFound)
+                [fm removeItemAtPath:path error:nil];
+        }
+
+    if (!lib) {
+        unsetenv("MADEIRA_VULKAN_LIBRARY");
+        if (vkd3d)
+            dprintf(STDERR_FILENO, "[vulkan] d3d12 = vkd3d with vulkan = off: madeira-d3d12 stays this session's D3D12\n");
+        if (dxvk)
+            dprintf(STDERR_FILENO, "[vulkan] d3d11 = dxvk with vulkan = off: DXMT stays this session's D3D10/11 and DXGI\n");
+        return;
+    }
+    if ((![lib isEqualToString:@"madeira-static-moltenvk"] && access(lib.fileSystemRepresentation, R_OK) != 0) ||
+        access([stack stringByAppendingPathComponent:@"winevulkan.dll"].fileSystemRepresentation, R_OK) != 0 ||
+        access([stack stringByAppendingPathComponent:@"vulkan-1.dll"].fileSystemRepresentation, R_OK) != 0) {
+        unsetenv("MADEIRA_VULKAN_LIBRARY");
+        dprintf(STDERR_FILENO, "[vulkan] Vulkan stays off: %s or the bundle's vulkan/arm64ec-windows/{winevulkan,vulkan-1}.dll "
+                "is missing%s%s\n", lib.UTF8String, vkd3d ? " (d3d12 = vkd3d ignored: madeira-d3d12 stays)" : "",
+                dxvk ? " (d3d11 = dxvk ignored: DXMT stays)" : "");
+        return;
+    }
+    setenv("MADEIRA_VULKAN_LIBRARY", lib.UTF8String, 1);   /* read by build/win32u-unix/vulkan_ios.c */
+
+    for (NSString *dir in dirs)
+        for (NSString *dll in vulkan_dlls)
+            linked += madeira_link_vulkan_file(fm, [win stringByAppendingPathComponent:dir], dll,
+                                               [stack stringByAppendingPathComponent:dll]);
+    if (vkd3d) {
+        if (access([stack stringByAppendingPathComponent:@"d3d12.dll"].fileSystemRepresentation, R_OK) == 0 &&
+            access([stack stringByAppendingPathComponent:@"d3d12core.dll"].fileSystemRepresentation, R_OK) == 0) {
+            for (NSString *dir in dirs)
+                for (NSString *dll in vkd3d_dlls)
+                    vkd3d_linked += madeira_link_vulkan_file(fm, [win stringByAppendingPathComponent:dir], dll,
+                                                             [stack stringByAppendingPathComponent:dll]);
+        } else {
+            dprintf(STDERR_FILENO, "[vulkan] d3d12 = vkd3d, but the bundle has no vulkan/arm64ec-windows/d3d12.dll and "
+                    "d3d12core.dll (build/vkd3d-proton/build.sh): madeira-d3d12 stays\n");
+        }
+    }
+    if (dxvk) {
+        BOOL have = YES;
+
+        for (NSString *dll in dxvk_dlls)
+            if (access([stack stringByAppendingPathComponent:[@"dxvk-" stringByAppendingString:dll]].fileSystemRepresentation,
+                       R_OK) != 0)
+                have = NO;
+        if (have) {
+            const char *level;
+            char d3d12v[32] = "";
+            BOOL d3d12_set = madeira_cfg_get("d3d12", d3d12v, sizeof d3d12v) && d3d12v[0];
+
+            for (NSString *dir in dirs)
+                for (NSString *dll in dxvk_dlls)
+                    dxvk_linked += madeira_link_vulkan_file(fm, [win stringByAppendingPathComponent:dir], dll,
+                                                            [stack stringByAppendingPathComponent:
+                                                                [@"dxvk-" stringByAppendingString:dll]]);
+            /* Under Wine DXVK logs through __wine_dbg_output (the session log),
+             * and writes no log file unless DXVK_LOG_PATH names a folder;
+             * overwrite=0 keeps a madeira.cfg env.DXVK_LOG_LEVEL. */
+            setenv("DXVK_LOG_LEVEL", "info", 0);
+            level = getenv("DXVK_LOG_LEVEL");   /* DXVK's log level (none, error, warn, info, debug, trace); d3d11 = dxvk makes it info unless set */
+            dprintf(STDERR_FILENO, "[vulkan] d3d11 = dxvk: DXVK's d3d11.dll, d3d10core.dll and dxgi.dll for this session "
+                    "(links %d in %s); D3D12 = %s%s; DXVK_LOG_LEVEL=%s\n", dxvk_linked,
+                    use_arm64ec ? "system32 + sysx64" : "sysx64", vkd3d_linked ? "vkd3d-proton" : "madeira-d3d12",
+                    vkd3d_linked && !d3d12_set ? " (d3d12 unset: d3d11 = dxvk implies d3d12 = vkd3d)" : "",
+                    level ? level : "(unset)");
+            if (!vkd3d_linked)
+                dprintf(STDERR_FILENO, "[vulkan] d3d11 = dxvk without vkd3d-proton (d3d12 = %s): madeira-d3d12 cannot "
+                        "present through DXVK's dxgi, so Direct3D 12 programs get no swapchain this session\n",
+                        d3d12_set ? d3d12v : "vkd3d, DLLs missing");
+        } else {
+            dprintf(STDERR_FILENO, "[vulkan] d3d11 = dxvk, but the bundle has no vulkan/arm64ec-windows/dxvk-d3d11.dll, "
+                    "dxvk-d3d10core.dll and dxvk-dxgi.dll (build/dxvk/build.sh): DXMT stays\n");
+        }
+    }
+    dprintf(STDERR_FILENO, "[vulkan] on: MADEIRA_VULKAN_LIBRARY=%s; %d Vulkan DLL links in %s; D3D12 = %s (%d links); "
+            "D3D10/11 = %s (%d links)\n",
+            lib.UTF8String, linked, use_arm64ec ? "system32 + sysx64" : "sysx64",
+            vkd3d_linked ? "vkd3d-proton" : "madeira-d3d12", vkd3d_linked,
+            dxvk_linked ? "DXVK" : "DXMT", dxvk_linked);
 }
 
 /* ml1275: C:\windows\mono\mono-2.0 -> the bundle's Wine Mono, when the build
@@ -885,6 +1239,52 @@ static void madeira_publish_host_probe(void)
     dprintf(STDERR_FILENO, "[WineProc] FEX host feature probe: %s\n", buf);
 }
 
+/* Decode Windows argument quoting before Wine rebuilds its command line from
+ * argv. Based on Wine's CommandLineToArgvW non-executable argument rules:
+ * backslashes escape quotes only when immediately followed by a quote.
+ * Never silently discard arguments or truncate the caller's command. */
+static int madeira_split_launch_args(const char *input, char *storage, size_t storage_capacity,
+                                     char **argv_out, size_t argv_capacity) {
+    const char *s = input ? input : "";
+    char *d = storage;
+    size_t length, argc = 0;
+    if (!storage || !storage_capacity || (!argv_out && argv_capacity)) return -1;
+    length = strnlen(s, storage_capacity);
+    if (length >= storage_capacity) return -1;
+    for (size_t i = 0; i < length; i++)
+        if (((unsigned char)s[i] < 32 && s[i] != '\t') || (unsigned char)s[i] == 127) return -1;
+    while (*s) {
+        unsigned int quotes = 0, backslashes = 0;
+        while (*s == ' ' || *s == '\t') s++;
+        if (!*s) break;
+        if (argc == argv_capacity) return -2;
+        argv_out[argc++] = d;
+        while (*s && !((*s == ' ' || *s == '\t') && !quotes)) {
+            if (*s == '\\') {
+                *d++ = *s++;
+                backslashes++;
+            } else if (*s == '"') {
+                if (!(backslashes & 1)) {
+                    d -= backslashes / 2;
+                    if (quotes && s[1] == '"') { *d++ = '"'; s++; }
+                    else quotes = !quotes;
+                } else {
+                    d -= backslashes / 2 + 1;
+                    *d++ = '"';
+                }
+                s++;
+                backslashes = 0;
+            } else {
+                *d++ = *s++;
+                backslashes = 0;
+            }
+        }
+        if (quotes) return -1;
+        *d++ = 0;
+    }
+    return (int)argc;
+}
+
 static void *wine_process_thread(void *arg) {
     @autoreleasepool {
         /* Perf: the guest main thread runs ON this pthread. Promote to
@@ -978,6 +1378,33 @@ static void *wine_process_thread(void *arg) {
          * so the next log proves it arrived rather than leaving us to infer it. */
         setenv("FNA3D_FORCE_DRIVER", "D3D11", 0);
 
+        /* OpenGL backend for the winios GL driver (build/win32u-unix/opengl_ios.c):
+         *   zink - desktop OpenGL 3.3-4.x: Mesa OSMesa + Zink on MoltenVK, from the
+         *          bundle's gl/ folder (build/mesa-ios, build/moltenvk-ios)
+         *   gles - Apple's OpenGL ES 3.0 (EAGL); desktop-GL-only apps fail
+         * madeira.cfg `gl-backend = zink|gles` chooses; otherwise zink when its
+         * dylibs are bundled. MADEIRA_GL_BACKEND in the environment wins over both.
+         * The driver falls back to gles by itself if Zink cannot start. */
+        {
+            NSString *glDir = [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"gl"];
+            BOOL haveZink = [[NSFileManager defaultManager] fileExistsAtPath:
+                                [glDir stringByAppendingPathComponent:@"libOSMesa.dylib"]];
+            char glb[16] = "";
+            if (!madeira_cfg_get("gl-backend", glb, sizeof glb) || !glb[0])
+                strlcpy(glb, haveZink ? "zink" : "gles", sizeof glb);
+            setenv("MADEIRA_GL_BACKEND", glb, 0);
+            setenv("MADEIRA_GL_DIR", glDir.UTF8String, 1);
+            LOG("OpenGL backend: %{public}s (zink bundled: %d)", getenv("MADEIRA_GL_BACKEND"), haveZink);
+
+            /* With the GLES backend there is no desktop GL context, so make LOVE ask
+             * for OpenGL ES first. LOVE 11 checks this SDL hint (read from the
+             * environment) before trying desktop GL; SDL then creates the context
+             * through WGL_EXT_create_context_es2_profile, which that backend
+             * advertises. overwrite=0: an explicit setting still wins. */
+            if (!strcmp(getenv("MADEIRA_GL_BACKEND"), "gles"))
+                setenv("LOVE_GRAPHICS_USE_OPENGLES", "1", 0);
+        }
+
         /* ml720: make Mono report unhandled exceptions and assembly-load failures.
          *
          * DIAGNOSTIC — revisit before shipping; this is chatty and costs startup time.
@@ -1026,11 +1453,29 @@ static void *wine_process_thread(void *arg) {
             if (aerr) LOG("AVAudioSession setCategory failed: %{public}s",
                           aerr.localizedDescription.UTF8String);
             aerr = nil;
+            /* A shared-mode client that keeps only one 10 ms engine period queued
+             * (IAudioClient3 low latency) loses audio when RemoteIO pulls a larger
+             * slice per callback (iOS's default is ~1024 frames, 21 ms): every
+             * callback empties the queue and plays silence for the rest. Ask for a
+             * 5 ms slice; the driver reports an engine period of at least two
+             * slices (MADEIRA_AUDIO_IO_US, audio_null_ios.c). MADEIRA_AUDIO_IO_MS
+             * sets the slice; 0 keeps the system's. */
+            {
+                const char *io = getenv("MADEIRA_AUDIO_IO_MS");
+                double ms = io && *io ? atof(io) : 5.0;
+                if (ms > 0 && ![session setPreferredIOBufferDuration:ms / 1000.0 error:&aerr])
+                    LOG("AVAudioSession setPreferredIOBufferDuration(%.1fms) failed: %{public}s",
+                        ms, aerr.localizedDescription.UTF8String);
+                aerr = nil;
+            }
             [session setActive:YES error:&aerr];
             if (aerr) LOG("AVAudioSession setActive failed: %{public}s",
                           aerr.localizedDescription.UTF8String);
-            else LOG("AVAudioSession active: rate=%.0f latency=%.1fms",
-                     session.sampleRate, session.outputLatency * 1000.0);
+            else LOG("AVAudioSession active: rate=%.0f latency=%.1fms io-buffer=%.2fms",
+                     session.sampleRate, session.outputLatency * 1000.0, session.IOBufferDuration * 1000.0);
+            char io_us[32];
+            snprintf(io_us, sizeof io_us, "%lld", (long long)(session.IOBufferDuration * 1e6));
+            setenv("MADEIRA_AUDIO_IO_US", io_us, 1);
         }
 
         /* 2026-07-04 BISECT RESULT: arm A (this env set, all handler fixes
@@ -1237,6 +1682,7 @@ static void *wine_process_thread(void *arg) {
                  * applyEnvironment exports belongs here (check-frontend). The game's own
                  * config lines ($MADEIRA_CFG_GAME, below) come after and win over both. */
                 static const char *const per_launch[] = {
+                    "MADEIRA_DESKTOP",          /* the game's Directly / In the Wine desktop choice */
                     "MADEIRA_FASTSYNC", "MADEIRA_FASTSYNC_SEM", "MADEIRA_CPU_COUNT", "DXMT_D9_ANISO_LIMIT",
                     "FEX_X87REDUCEDPRECISION",   /* ml1184: the game's "Reduced-precision x87" */
                     "MADEIRA_DINPUT_PAD",        /* ml1240: the game's "XInput and DirectInput" */
@@ -1261,6 +1707,11 @@ static void *wine_process_thread(void *arg) {
                                 k.UTF8String, getenv(k.UTF8String), v.UTF8String);
                         continue;
                     }
+                    if (madeira_env_is_locked(k.UTF8String)) {
+                        fprintf(stderr, "[madeira-env] %s is set by the app; "
+                                "the config value is ignored\n", k.UTF8String);
+                        continue;
+                    }
                     setenv(k.UTF8String, v.UTF8String, 1);
                     LOG("madeira.cfg env: %{public}s=%{public}s", k.UTF8String, v.UTF8String);
                     fprintf(stderr, "[madeira-env] ml1062 %s=%s\n", k.UTF8String, v.UTF8String);
@@ -1281,6 +1732,11 @@ static void *wine_process_thread(void *arg) {
                     NSString *k = [[line substringWithRange:NSMakeRange(4, eq.location - 4)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
                     NSString *v = [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
                     if (!k.length) continue;
+                    if (madeira_env_is_locked(k.UTF8String)) {
+                        fprintf(stderr, "[madeira-env] %s is set by the app; "
+                                "the config value is ignored\n", k.UTF8String);
+                        continue;
+                    }
                     setenv(k.UTF8String, v.UTF8String, 1);
                     LOG("game config env: %{public}s=%{public}s", k.UTF8String, v.UTF8String);
                     fprintf(stderr, "[madeira-env] game %s=%s\n", k.UTF8String, v.UTF8String);
@@ -1314,6 +1770,17 @@ static void *wine_process_thread(void *arg) {
                     if (g_madeira_srv_fgetpath)
                         fprintf(stderr, "[madeira-env] MADEIRA_SRV_FGETPATH=1: the server names the files it opens with F_GETPATH\n");
                 }
+                /* DXMT's shader caches persist for 64-bit games too: winemetal's
+                 * DXMT_IOS_CACHE_DIR defaults on only for a WoW64 caller, and the
+                 * upstream lookup a 64-bit caller keeps finds no cache directory in
+                 * the iOS sandbox, so every converted shader and Metal pipeline was
+                 * built again in each session (Rocket League stalled up to 327 ms on
+                 * goal explosions and replays). Never overrides a value already set
+                 * (env.DXMT_IOS_CACHE_DIR = 0 in madeira.cfg turns it off). */
+                if (!getenv("DXMT_IOS_CACHE_DIR")) {
+                    setenv("DXMT_IOS_CACHE_DIR", "1", 0);
+                    fprintf(stderr, "[madeira-env] DXMT_IOS_CACHE_DIR=1 (default: shader caches under Library/Caches)\n");
+                }
             }
         }
 
@@ -1343,6 +1810,116 @@ static void *wine_process_thread(void *arg) {
             }
         }
 
+        /* madeira-stdout-pipe: hand the guest's stdout to a pipe, and leave
+         * stderr on the log.
+         *
+         * The split is the one the code already has: Wine's err:/warn: channels
+         * and every dprintf(STDERR_FILENO, ...) go to stderr, the guest's printf
+         * goes to stdout. Separating the file descriptors separates program
+         * output from runtime narration by the kernel rather than by matching
+         * line prefixes after the fact -- which is the only way a terminal can
+         * interpret an escape sequence that a telemetry line would otherwise
+         * land in the middle of.
+         *
+         * Opt-in, because an unread pipe fills at 64 KB and blocks the guest
+         * forever on its next write. The reader creates the flag file. */
+        {
+            NSString *docs3 = NSSearchPathForDirectoriesInDomains(
+                NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+            /* env.MADEIRA_STDOUT_PIPE = 1 moves the guest's stdout onto its
+             * own pipe, leaving fd 2 on madeira-log.txt. That is the seam the
+             * code already had: Wine's err:/warn: channels and every
+             * dprintf(STDERR_FILENO, ...) are stderr, the guest's printf is
+             * stdout. Off by default for the same reason as the stdin half --
+             * an unread pipe fills at 64 KB and blocks the guest -- so only a
+             * front end that drains it should ask. Documents/madeira-stdout.txt
+             * still works. */
+            NSString *flag = [docs3 stringByAppendingPathComponent:@"madeira-stdout.txt"];
+            const char *stdout_opt = getenv( "MADEIRA_STDOUT_PIPE" );
+            if ([[NSFileManager defaultManager] fileExistsAtPath:flag] ||
+                (stdout_opt && stdout_opt[0] == '1')) {
+                int fds[2];
+                if (pipe(fds) != 0) {
+                    dprintf(STDERR_FILENO, "[stdout-pipe] pipe() failed errno=%d\n", errno);
+                } else {
+                    dup2(fds[1], STDOUT_FILENO);
+                    if (fds[1] != STDOUT_FILENO) close(fds[1]);
+                    /* Non-blocking: the reader polls and must not stall while
+                     * the guest is quiet. */
+                    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
+                    madeira_stdout_master = fds[0];
+                    dprintf(STDERR_FILENO,
+                            "[stdout-pipe] guest stdout is a pipe, read end=%d\n", fds[0]);
+                }
+            }
+        }
+
+        // ---- Optional pipe on fd 0, and optional forced console ----
+        // Both opt-in via Documents files; absent, nothing here runs
+        // and fd 0 stays whatever iOS gave us (which the 2026-09-16 probe
+        // showed reads as immediate EOF).
+        //
+        // A pipe, not a pty: posix_openpt is EPERM under the iOS sandbox. It
+        // turns out not to matter -- Wine's is_tty_handle() is a pointer-tag
+        // test, not a tty test, so a tagged pipe reaches conhost the same way.
+        {
+            /* env.MADEIRA_STDIN_PIPE = 1 puts a pipe on fd 0 so a guest can
+             * read stdin at all; without it fd 0 is whatever iOS gave us,
+             * which reads as immediate EOF. Off by default: an unread pipe
+             * fills at 64 KB and blocks the guest on its next write, so only a
+             * front end that drains it should ask for one.
+             * Documents/madeira-stdin.txt still works and additionally seeds
+             * the pipe with its contents, which is how a probe supplies canned
+             * input with no front end at all. */
+            NSString *docs2 = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+            NSData *seed = [NSData dataWithContentsOfFile:
+                            [docs2 stringByAppendingPathComponent:@"madeira-stdin.txt"]];
+            const char *stdin_opt = getenv( "MADEIRA_STDIN_PIPE" );
+            if (seed || (stdin_opt && stdin_opt[0] == '1')) {
+                int fds[2];
+                if (pipe(fds) != 0) {
+                    dprintf(STDERR_FILENO, "[stdin-pipe] pipe() failed errno=%d\n", errno);
+                } else {
+                    dup2(fds[0], STDIN_FILENO);
+                    if (fds[0] != STDIN_FILENO) close(fds[0]);
+                    madeira_stdin_master = fds[1];
+                    dprintf(STDERR_FILENO,
+                            "[stdin-pipe] fd 0 is a pipe, isatty=%d, write end=%d\n",
+                            isatty(STDIN_FILENO), fds[1]);
+                    // Non-blocking write end. XNU pipes start at 16KB and only
+                    // grow toward 64KB opportunistically, and nothing bounds the
+                    // size of madeira-stdin.txt -- a blocking write with no
+                    // reader yet would hang the Wine thread before __wine_main,
+                    // with the last log line being the one above.
+                    int fl = fcntl(fds[1], F_GETFL, 0);
+                    if (fl != -1) fcntl(fds[1], F_SETFL, fl | O_NONBLOCK);
+                    if (seed && seed.length) {
+                        ssize_t w = write(fds[1], seed.bytes, seed.length);
+                        if (w < 0) {
+                            dprintf(STDERR_FILENO, "[stdin-pipe] seed write failed errno=%d\n", errno);
+                        } else if ((unsigned long)w < seed.length) {
+                            dprintf(STDERR_FILENO,
+                                    "[stdin-pipe] WARNING seed TRUNCATED: %zd of %lu bytes -- "
+                                    "the pipe buffer is full and nothing has read yet\n",
+                                    w, (unsigned long)seed.length);
+                        } else {
+                            dprintf(STDERR_FILENO, "[stdin-pipe] seeded %zd bytes\n", w);
+                        }
+                    }
+                }
+            }
+
+            // Separate knob: ask the guest to build a console anyway. Read here
+            // rather than in ContentView because this runs in the same process
+            // before __wine_main, so setenv is visible to env_ios.c.
+            if ([[NSFileManager defaultManager] fileExistsAtPath:
+                 [docs2 stringByAppendingPathComponent:@"madeira-console.txt"]]) {
+                setenv("MADEIRA_FORCE_CONSOLE", "1", 1);
+                dprintf(STDERR_FILENO,
+                        "[force-console] MADEIRA_FORCE_CONSOLE=1 via madeira-console.txt\n");
+            }
+        }
+
         // Pick which exe to run (env var override, default = cube.exe).
         // Set MADEIRA_EXE=hello-x64.exe in env to launch the ARM64EC test path.
         const char *madeira_exe = getenv("MADEIRA_EXE");
@@ -1355,9 +1932,6 @@ static void *wine_process_thread(void *arg) {
         // Otherwise: detect "x64" in the exe name (cube-x64, fib-x64, etc.)
         // OR a Win32 full path (real game launches typically need ARM64EC).
         const char *force_ec = getenv("MADEIRA_USE_ARM64EC");
-        BOOL use_arm64ec = (force_ec && *force_ec == '1') ||
-                           (strstr(madeira_exe, "x64") != NULL) ||
-                           (strchr(madeira_exe, '\\') != NULL);
 
         /* WoW64: a 32-bit (i386) target, from the PE header on disk rather
          * than the name. Its 64-bit half runs on the plain aarch64 core (the
@@ -1371,7 +1945,11 @@ static void *wine_process_thread(void *arg) {
         dprintf(STDERR_FILENO, "[WineProc] PE probe: machine=0x%x%s\n", target_machine,
                 is_i386_target ? " (i386: WoW64)" :
                 target_machine == MADEIRA_IMAGE_FILE_MACHINE_I386 ? " (i386, but the bundle has no i386-windows)" : "");
-        if (is_i386_target) use_arm64ec = NO;
+        const BOOL use_arm64ec = madeira_use_arm64ec_for_target(madeira_exe, force_ec,
+                                                               target_machine, has_i386_set);
+        dprintf(STDERR_FILENO, "[WineProc] PE routing: machine=0x%04x bundle=%s i386-set=%d force-ec=%d\n",
+                target_machine, use_arm64ec ? "arm64ec-windows" : "aarch64-windows",
+                has_i386_set, force_ec && *force_ec == '1');
         const char *bundle_subdir = use_arm64ec ? "arm64ec-windows" : "aarch64-windows";
         LOG("Target exe: %{public}s (bundle=%{public}s)", madeira_exe, bundle_subdir);
         dprintf(STDERR_FILENO, "[WineProc] Target exe: %s (bundle=%s)\n", madeira_exe, bundle_subdir);
@@ -1479,6 +2057,9 @@ static void *wine_process_thread(void *arg) {
                 madeira_seed_winsxs_x86(fm, prefix, bundlePath);
             }
             madeira_link_wine_mono(fm, prefix, bundlePath);
+            if (madeira_d3d9_wined3d_wanted())
+                madeira_link_d3d9_wined3d(fm, prefix, bundlePath, has_i386_set);
+            madeira_setup_vulkan(fm, prefix, bundlePath, use_arm64ec);
 
             /* ml719: REPAIR THE SHELL FOLDERS. They ship as symlinks to the BUILD
              * MACHINE's home directory.
@@ -1599,8 +2180,32 @@ static void *wine_process_thread(void *arg) {
                 dprintf(STDERR_FILENO, "[WineProc] MADEIRA_WINE_VCRT=1: MS VC++ runtime overlay skipped\n");
             } else
             if (use_arm64ec) {
-                NSString *vcrtSource = [bundlePath stringByAppendingPathComponent:@"x86_64-vcruntime"];
-                NSArray *vcrtDlls = [fm contentsOfDirectoryAtPath:vcrtSource error:nil];
+                /* madeira-vcruntime-sources: two sources, not one.
+                 *
+                 * The bundle is read-only and signature-sealed, so DLLs placed
+                 * there can only arrive by rebuilding the app -- which for a
+                 * sideloaded build is the entire install cycle. Documents is
+                 * user-writable (UIFileSharingEnabled), so it is searched
+                 * first and a user-supplied file shadows a bundled one. */
+                NSString *vcrtBundleSource = [bundlePath stringByAppendingPathComponent:@"x86_64-vcruntime"];
+                NSString *vcrtDocsSource = [NSSearchPathForDirectoriesInDomains(
+                    NSDocumentDirectory, NSUserDomainMask, YES).firstObject
+                    stringByAppendingPathComponent:@"vcruntime"];
+                NSMutableArray *vcrtNames = [NSMutableArray array];
+                NSMutableDictionary *vcrtHome = [NSMutableDictionary dictionary];
+                for (NSString *dir in @[vcrtDocsSource, vcrtBundleSource]) {
+                    for (NSString *f in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+                        /* Skip anything that is not a DLL. Without this the
+                         * placeholder README.txt that has to exist for Xcode's
+                         * resource copy to succeed is symlinked into system32,
+                         * and the "Symlinked N" count counts it. */
+                        if (![[f pathExtension] isEqualToString:@"dll"]) continue;
+                        if (vcrtHome[[f lowercaseString]]) continue;  /* Documents wins */
+                        vcrtHome[[f lowercaseString]] = [dir stringByAppendingPathComponent:f];
+                        [vcrtNames addObject:f];
+                    }
+                }
+                NSArray *vcrtDlls = vcrtNames;
                 int vcrtLinked = 0, vcrtSkipped = 0;
                 /* madeira-bcd: MFC (mfc140.dll, mfc140u.dll) comes from the same
                  * VC_redist.x64.exe since 2026-10-09: Horizon Zero Dawn imports
@@ -1655,7 +2260,7 @@ static void *wine_process_thread(void *arg) {
                         vcrtSkipped++;
                         continue;
                     }
-                    NSString *src = [vcrtSource stringByAppendingPathComponent:dll];
+                    NSString *src = vcrtHome[[dll lowercaseString]];
                     NSString *dst = [sys32Dir stringByAppendingPathComponent:dll];
                     [fm removeItemAtPath:dst error:nil];
                     if ([fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil])
@@ -1663,6 +2268,37 @@ static void *wine_process_thread(void *arg) {
                 }
                 LOG("Symlinked %d MS VC++ Runtime DLLs (x86_64 native) over arm64ec builtins, skipped %d", vcrtLinked, vcrtSkipped);
                 dprintf(STDERR_FILENO, "[WineProc] Symlinked %d MS VC++ Runtime DLLs over arm64ec builtins (skipped %d for native EC SEH)\n", vcrtLinked, vcrtSkipped);
+            }
+
+            /* Desktop OpenGL for x64 games: Mesa's opengl32.dll and its
+             * libgallium_wgl.dll run OpenGL on D3D12 (madeira_d3d12, then
+             * Metal), with Microsoft's dxil.dll validating the shaders.
+             * build/mesa-d3d12/build.sh writes them to x86_64-opengl/; an
+             * empty folder changes nothing. Wine's builtin opengl32 here is a
+             * native WGL route on OpenGL ES or Zink. The alternative overlay
+             * is selected with env.MADEIRA_OPENGL = 1. The loop above has
+             * already restored the builtin opengl32 for this session, so off
+             * only has to drop the overlay's other files. A game folder that
+             * ships its own opengl32.dll still comes first. */
+            if (use_arm64ec) {
+                NSString *glSource = [bundlePath stringByAppendingPathComponent:@"x86_64-opengl"];
+                const char *glSwitch = getenv("MADEIRA_OPENGL");
+                const BOOL glOn = glSwitch && glSwitch[0] == '1';
+                int glLinked = 0;
+                for (NSString *dll in [fm contentsOfDirectoryAtPath:glSource error:nil]) {
+                    if (![[[dll pathExtension] lowercaseString] isEqualToString:@"dll"]) continue;
+                    NSString *src = [glSource stringByAppendingPathComponent:dll];
+                    NSString *dst = [sys32Dir stringByAppendingPathComponent:dll];
+                    if (glOn) {
+                        [fm removeItemAtPath:dst error:nil];
+                        if ([fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil]) glLinked++;
+                    } else if ([[fm destinationOfSymbolicLinkAtPath:dst error:nil] isEqualToString:src] &&
+                               ![fm fileExistsAtPath:[dllSource stringByAppendingPathComponent:dll]]) {
+                        [fm removeItemAtPath:dst error:nil];
+                    }
+                }
+                dprintf(STDERR_FILENO, "[WineProc] OpenGL: %s (%d Mesa DLLs linked over the builtin)\n",
+                        glOn ? "Mesa on D3D12" : "Wine builtin (MADEIRA_OPENGL=0)", glLinked);
             }
         }
 
@@ -1681,43 +2317,36 @@ static void *wine_process_thread(void *arg) {
             snprintf(exe_path, sizeof(exe_path), "C:\\windows\\system32\\%s", madeira_exe);
         }
 
-        // Optional MADEIRA_ARGS env var: args appended to argv, split in place.
-        // ml1163: double quotes group a token, so a game path such as
-        // "C:\Program Files\Game\game.exe" (a library game started in the Wine
-        // desktop hands explorer one) stays ONE argument. The quotes themselves are
-        // dropped: Wine re-quotes any argv entry with a space when it builds the
-        // command line. Up to 64 extra tokens (was 16, split on spaces only).
+        // Optional MADEIRA_ARGS: Windows command-line quoting (CommandLineToArgvW
+        // rules), at most 64 arguments in 4 KB. Malformed or oversized input
+        // fails the launch instead of silently dropping or splitting arguments.
         static char args_buf[4096];
         char *extra_argv[64] = {0};
-        int extra_argc = 0;
         const char *madeira_args = getenv("MADEIRA_ARGS");
-        if (madeira_args && *madeira_args) {
-            strncpy(args_buf, madeira_args, sizeof(args_buf) - 1);
-            args_buf[sizeof(args_buf) - 1] = 0;
-            char *r = args_buf, *w = args_buf;   /* w never passes r: tokens only shrink */
-            while (*r && extra_argc < 64) {
-                while (*r == ' ' || *r == '\t') r++;
-                if (!*r) break;
-                extra_argv[extra_argc++] = w;
-                int quoted = 0;
-                while (*r && (quoted || (*r != ' ' && *r != '\t'))) {
-                    if (*r == '"') { quoted = !quoted; r++; continue; }
-                    *w++ = *r++;
-                }
-                if (*r) r++;
-                *w++ = 0;
-            }
+        int extra_argc = madeira_split_launch_args(madeira_args, args_buf, sizeof(args_buf),
+                                                   extra_argv, sizeof(extra_argv) / sizeof(extra_argv[0]));
+        if (extra_argc < 0) {
+            dprintf(STDERR_FILENO, "[WineProc] launch rejected: invalid or oversized arguments (parser=%d)\n", extra_argc);
+            wine_launched_process_did_exit((int)0xc000000d); /* STATUS_INVALID_PARAMETER */
+            g_wine_running = 0;
+            wineserver_stop();
+            return NULL;
         }
 
-        char *argv[72];
+        char *argv[67]; /* wine + executable + 64 arguments + NULL */
         int argc = 0;
         argv[argc++] = "wine";
         argv[argc++] = exe_path;
         for (int i = 0; i < extra_argc; i++) argv[argc++] = extra_argv[i];
         argv[argc] = NULL;
         dprintf(STDERR_FILENO, "[WineProc] argv[1] = %s\n", exe_path);
+        /* An argument may be a credential (a sign-in token, a password): each is
+         * logged as a redacted copy; argv itself is passed on unchanged. */
+        int credential_next = 0;
         for (int i = 0; i < extra_argc; i++) {
-            dprintf(STDERR_FILENO, "[WineProc] argv[%d] = %s\n", 2 + i, extra_argv[i]);
+            char shown[sizeof(args_buf) + 64];
+            madeira_redact_arg_a(extra_argv[i], &credential_next, shown, sizeof(shown));
+            dprintf(STDERR_FILENO, "[WineProc] argv[%d] = %s\n", 2 + i, shown);
         }
 
         /* iOS-Madeira: chdir to the unix path that maps to the exe's Wine
@@ -1811,6 +2440,13 @@ static void *wine_process_thread(void *arg) {
             dprintf(STDERR_FILENO, "[WineProc] Wine exited with code %d (caught by longjmp)\n", wine_ios_exit_code);
         }
 
+        /* wine_ios_exit_code is _Thread_local, so copy it somewhere the app
+         * thread can read. RELEASE so a reader that sees g_wine_running == 0
+         * is guaranteed to see this value too -- volatile alone does not order
+         * these on arm64. */
+        __atomic_store_n(&g_wine_exit_code, (int)wine_ios_exit_code,
+                         __ATOMIC_RELEASE); /* madeira-exit-code */
+
         /* A launcher stub that starts the game and exits at once (GTA V
          * Enhanced: PlayGTAV.exe -> GTA5_Enhanced.exe) must not end the
          * session -- stopping the wineserver here killed the game while it
@@ -1852,6 +2488,8 @@ static void *wine_process_thread(void *arg) {
         unsetenv("MADEIRA_CPU_COUNT"); unsetenv("DXMT_D9_ANISO_LIMIT");
         unsetenv("FEX_X87REDUCEDPRECISION");   /* ml1184 */
         unsetenv("MADEIRA_DINPUT_PAD");        /* ml1240 */
+        unsetenv("MADEIRA_DESKTOP");           /* each launch chooses its own presentation mode */
+        unsetenv("MADEIRA_DIRECT_WINDOW_SIZE"); /* a game's opt-in must not resize the next game */
         /* madeira-bcd: Horizon Zero Dawn's per-game switches must not reach a later game
          * of this app run (GTA V Enhanced runs without them). */
         unsetenv("MADEIRA_SRV_FGETPATH");
@@ -1947,6 +2585,10 @@ int wine_process_start(const char *prefix_path) {
 
 int wine_process_is_running(void) {
     return g_wine_running;
+}
+
+int wine_process_exit_code(void) {
+    return __atomic_load_n(&g_wine_exit_code, __ATOMIC_ACQUIRE);
 }
 
 int madeira_write_continue_flag(void) {

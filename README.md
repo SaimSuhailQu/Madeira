@@ -60,8 +60,10 @@ Wine's server runs as a thread instead of a separate program.
   helper. On iOS 27 the built-in helper can pair the iPhone itself, without a
   computer.
 - An **Apple ID** to sideload the app. A free account works; its signing
-  expires after 7 days, so the app needs refreshing weekly. Your games and
-  saves are kept across reinstalls.
+  expires after 7 days, so the app needs refreshing weekly. Madeira
+  [refreshes itself](docs/JIT.md#refreshing-the-signing): installed with
+  SideInstaller it needs nothing more, otherwise sign in under Settings → Signing.
+  Your games and saves are kept across reinstalls.
 
 Because JIT needs a debugger, Madeira cannot be offered on the App Store.
 
@@ -90,6 +92,15 @@ own forks; upstream checkouts will not build here. The build has several parts
 (the Wine unix libraries, the ARM64EC Windows modules, FEX, DXMT and the app)
 and some inputs that are not in the repository, such as the toolchains.
 [`docs/BUILDING.md`](docs/BUILDING.md) walks through all of it.
+git clone --recurse-submodules <this repo>
+cd Madeira
+./tools/build-ipa.sh   # produces dist/Madeira.ipa
+```
+
+See [`BUILDING.md`](BUILDING.md) for prerequisites, timing, and re-run notes.
+
+Note that `FEX`, `wine` and `research/dxmt` are submodules pointing at forks
+containing the iOS work; upstream clones will not build here.
 
 ### Repository layout
 

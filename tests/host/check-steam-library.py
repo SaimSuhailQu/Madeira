@@ -122,6 +122,13 @@ for path in ['SteamOwnedLibrary.swift', 'SteamGames.swift', 'SteamInstall.swift'
             continue  # it logs on with the token SteamSignIn hands out
         if path == 'SteamGames.swift' and word == 'UserDefaults':
             continue
+        if path == 'SteamOwnedLibrary.swift' and word == 'UserDefaults':
+            uses = [line.strip() for line in text.splitlines() if 'UserDefaults' in line]
+            require(uses == [
+                'private var targets: [Int: String] = (UserDefaults.standard.dictionary(forKey: "steam-install-targets") as? [String: String] ?? [:])',
+                'UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: targets.map { (String($0.key), $0.value) }), forKey: Self.targetsKey)'],
+                'UserDefaults holds only install destinations, never sign-in tokens')
+            continue
         require(word not in text, f'{path}: no {word} (sign-in tokens stay in SteamSignIn)')
 require('SteamSignIn.credentialsForDock()' in sources['SwiftSteam/Core/SteamSession.swift'],
         "the connection logs on with SteamSignIn's stored sign-in")
@@ -150,7 +157,7 @@ require(len(permitted) == 1 and re.findall(r'<string>([^<]*)</string>', permitte
         "Info.plist permits only the bundle's own .download.* (background downloads) and .pairing.* (JIT pairing) tasks")
 require('UIBackgroundModes' not in info, 'Info.plist asks for no background mode')
 background = sources['SteamDownloadBackground.swift']
-require('hasSuffix(".download.*")' in background and '+ "queue"' in background and 'BGContinuedProcessingTaskRequest(identifier: identifier' in background,
+require('hasSuffix(".download.*")' in background and '+ suffix' in background and 'suffix: String = "queue"' in background and 'BGContinuedProcessingTaskRequest(identifier: identifier' in background,
         'the continued-processing task uses the permitted identifier, made concrete')
 require('SteamSignIn.flag("MADEIRA_BACKGROUND_DOWNLOADS", default: true)' in background and
         'SteamSignIn.flag("MADEIRA_DOWNLOAD_NOTIFICATIONS", default: true)' in background,
@@ -514,6 +521,7 @@ size_t compression_decode_buffer(uint8_t *dst, size_t dst_size, const uint8_t *s
 DECODERS_H = '#include "{app}/SwiftSteam/lzma_shim.h"\n'
 
 STUBS = r'''
+enum ExternalDrives { static var steamLibraries: [String] { [] } }
 import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -526,6 +534,12 @@ enum SteamLog {
 }
 enum SteamSignIn {
     static func flag(_ name: String, default fallback: Bool) -> Bool { getenv(name).map { String(cString: $0) != "0" } ?? fallback }
+}
+// madeira.cfg for SteamLanguage: the setting starts at English, whatever the host's locale.
+nonisolated(unsafe) var configValues: [String: String] = ["env.MADEIRA_STEAM_LANGUAGE": "english"]
+enum MadeiraConfig {
+    static func get(_ key: String) -> String? { configValues[key] }
+    @discardableResult static func set(_ key: String, _ value: String?) -> Bool { configValues[key] = value; return true }
 }
 enum SteamRuntimeFiles {
     static let relativeRoot = "RELATIVE_ROOT"
@@ -792,9 +806,38 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     require(info.type == .game, "PICS type names match without case")
     require(info.installDepots().map(\.depotID) == [101, 102, 105], "install depots: common, English, 64-bit only")
     require(info.downloadSize(for: "windows") == 420, "the download size counts only the selected depots")
+    require(info.installSize(for: "windows") == 620, "the installed size: manifests.public.size, else the download figure")
     require(info.buildID == 4242 && info.installableOnWindows && info.installDir == "Fixture Game", "build id, install folder and Windows installability")
     require(info.libraryCapsule == "cap/1.jpg" && info.parentID == nil, "artwork name; a parent equal to itself is not kept")
     require(info.depotSelectionSummary().contains("103[-]lang") && info.depotSelectionSummary().contains("107[-]dlc"), "the selection log names the rule that left a depot out")
+
+    // ---- download language (SteamLanguage): the setting, a game's own choice, the English fallback
+    let languaged = SteamAppInfo.parse(appID: 11, from: appVDF(#"""
+    "common" { "name" "Lang" "type" "game" "oslist" "windows" "supported_languages" { "english" { "supported" "true" } "german" { "supported" "true" "full_audio" "true" } "japanese" { "supported" "true" } "french" { "supported" "false" } } }
+    "depots" {
+      "301" { "config" { "oslist" "windows" } "manifests" { "public" { "gid" "3001" } } }
+      "302" { "config" { "oslist" "windows" "language" "english" } "manifests" { "public" { "gid" "3002" } } }
+      "303" { "config" { "oslist" "windows" "language" "german" } "manifests" { "public" { "gid" "3003" } } }
+    }
+    """#))!
+    require(languaged.languages == ["english", "german", "japanese"], "supported languages from common.supported_languages, without unsupported ones")
+    require(languaged.installDepots().map(\.depotID) == [301, 302] && languaged.gameLanguage == "english", "English by default")
+    MadeiraConfig.set(SteamLanguage.configKey, "german")
+    require(languaged.installDepots().map(\.depotID) == [301, 303] && languaged.gameLanguage == "german",
+            "the setting picks the language-pack depots and the record's language")
+    MadeiraConfig.set(SteamLanguage.configKey, "japanese")
+    require(languaged.installDepots().map(\.depotID) == [301, 302] && languaged.depotLanguage == "english" && languaged.gameLanguage == "japanese",
+            "a supported language without depots: English depots, and the record names the language")
+    MadeiraConfig.set(SteamLanguage.configKey, "french")
+    require(languaged.installDepots().map(\.depotID) == [301, 302] && languaged.gameLanguage == "english", "a language the game lacks falls back to English")
+    SteamLanguage.chooseForGame(11, "german")
+    require(languaged.installDepots().map(\.depotID) == [301, 303] && info.installDepots().map(\.depotID) == [101, 102, 105],
+            "a game's own choice wins over the setting, for that game only")
+    SteamLanguage.chooseForGame(11, nil)
+    MadeiraConfig.set(SteamLanguage.configKey, "english")
+    require(SteamLanguage.steamName(Locale(identifier: "ja_JP")) == "japanese" && SteamLanguage.steamName(Locale(identifier: "zh-Hant-TW")) == "tchinese"
+            && SteamLanguage.steamName(Locale(identifier: "pt_BR")) == "brazilian" && SteamLanguage.steamName(Locale(identifier: "es_MX")) == "latam"
+            && SteamLanguage.steamName(Locale(identifier: "ko_KR")) == "koreana", "device languages map to Steam API language names")
     let legacy = SteamAppInfo.parse(appID: 10, from: appVDF(#"""
     "common" { "name" "Old" "type" "Game" "oslist" "windows" } "config" { "installdir" "Old" }
     "depots" { "201" { "config" { "oslist" "windows" "osarch" "32" } "manifests" { "public" "2001" } } "202" { "manifests" { "public" "2002" } } }
@@ -843,6 +886,10 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     let raw = hexData(fx["rawEncrypted"] as! String)
     let decrypted = try ContentDecryptor.decryptChunk(encryptedData: raw, depotKey: key)
     require(decrypted == plainVector.prefix(1000), "AES: the IV is ECB-decrypted, the rest CBC with PKCS7")
+    for count in [0, 16, 17, raw.count - 1] {
+        do { _ = try ContentDecryptor.decryptChunk(encryptedData: Data(raw.prefix(count)), depotKey: key); require(false, "truncated AES payload rejected") }
+        catch { require(true, "truncated AES payload rejected") }
+    }
     do { _ = try ContentDecryptor.decryptChunk(encryptedData: raw, depotKey: Data(count: 16)); require(false, "a short depot key is rejected") }
     catch { require(error is SteamError, "a short depot key is rejected") }
     do { _ = try ContentDecryptor.decompressChunk(compressedData: Data("ZZZZ-not-a-container".utf8), expectedSize: 999); require(false, "an unknown container is rejected") }
@@ -957,7 +1004,9 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
         do { try MadeiraDock.validate(game, drive: drive, bundled: true) ; require(false, "validate needs the client files") }
         catch { require(error.localizedDescription.contains("client"), "Dock's launch check passes the record and stops at the missing client files only") }
         require(SteamInstallFiles.buildID(appID: 9000, steamApps: steamApps) == build, "the record's build id")
-        require(found.first(where: { $0.id == 9100 })?.installed == true, "the owning app has its own record for the shared depot, as Valve's client requires")
+        require(SteamInstallFiles.depots(appID: 9100, steamApps: steamApps).contains(9003)
+                && SteamInstallFiles.buildID(appID: 9100, steamApps: steamApps) == 7,
+                "the owning app has its own record for the shared depot, as Valve's client requires")
         let events = loggedEvents.joined(separator: "\n")
         require(!events.contains("Fixture") && !events.contains("7656119") && !events.contains("tok"), "no name, account or token in the log")
         require(events.contains("[steam-depot] license app=9000 skipped=9004"), "a depot the account neither has a key for nor a license for is left out")
@@ -969,8 +1018,9 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
         require(ownedNow.buildID == 1001 && ownedNow.folderName == "Fixture Game", "the owned game carries the build")
     }
     if phase == "uninstall" {
-        SteamInstallFiles.delete(appID: 9000, folderName: "Fixture Game", steamApps: steamApps)
+        try SteamInstallFiles.delete(appID: 9000, folderName: "Fixture Game", steamApps: steamApps)
         require(MadeiraDock.games(drive: drive).isEmpty, "an uninstalled game is no longer found (its shared owner record went with it)")
+        require(!FileManager.default.fileExists(atPath: steamApps.appendingPathComponent("appmanifest_9100.acf").path), "the shared owner record was removed")
         require(!FileManager.default.fileExists(atPath: steamApps.appendingPathComponent("common/Fixture Game").path), "its folder is gone")
         require(FileManager.default.fileExists(atPath: steamApps.appendingPathComponent("common").path) , "the common folder stays")
     }
@@ -1005,26 +1055,31 @@ dock_body = (dock[dock.index('enum MadeiraDock {'):dock.index('    @MainActor pr
              dock[dock.index("    /// The host's environment for one launch."):])
 # URLSession lives in FoundationNetworking on Linux; the production file imports Foundation only.
 downloader_host = downloader.replace('import Foundation\n', 'import Foundation\n#if canImport(FoundationNetworking)\nimport FoundationNetworking\n#endif\n', 1)
-# The free-space query is Darwin's (volumeAvailableCapacityForImportantUsage); the host has none, so the check is skipped there.
-space = ('let values = try? installURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])\n'
-         '            let available = UInt64(max(0, values?.volumeAvailableCapacityForImportantUsage ?? Int64.max))')
-assert space in downloader_host
-downloader_host = downloader_host.replace(space, 'let available = UInt64.max')
+# Linux has no Darwin volume keys or statfs layout. Unknown capacity remains allowed.
+if sys.platform != 'darwin':
+    space = block(downloader_host, 'public var freeSpace: Int64?')
+    downloader_host = downloader_host.replace(space, 'public var freeSpace: Int64? { nil }\n')
 fetcher_source = sources['SwiftSteam/Library/SteamLibraryFetcher.swift']
 
 work = Path(tempfile.mkdtemp(prefix='madeira-steam-library-'))
 servers = []
 try:
     shim = work / 'shim'
-    for name, header, csource in [('CommonCrypto', CRYPTO_H, CRYPTO_C), ('Compression', COMPRESSION_H, COMPRESSION_C)]:
+    shim.mkdir()
+    native = sys.platform == 'darwin'
+    modules = []
+    for name, header, csource in ([] if native else [('CommonCrypto', CRYPTO_H, CRYPTO_C), ('Compression', COMPRESSION_H, COMPRESSION_C)]):
         directory = shim / name
         directory.mkdir(parents=True)
         stem = 'cc_shim' if name == 'CommonCrypto' else 'compression_shim'
         (directory / f'{stem}.h').write_text(header)
         (directory / f'{stem}.c').write_text(csource)
         (directory / 'module.modulemap').write_text(f'module {name} [system] {{ header "{stem}.h" export * }}\n')
-    (shim / 'zlib').mkdir()
-    (shim / 'zlib/module.modulemap').write_text('module zlib [system] { header "/usr/include/zlib.h" link "z" export * }\n')
+        modules += ['-I', str(directory)]
+    if not native:
+        (shim / 'zlib').mkdir()
+        (shim / 'zlib/module.modulemap').write_text('module zlib [system] { header "/usr/include/zlib.h" link "z" export * }\n')
+        modules += ['-I', str(shim / 'zlib')]
     (work / 'decoders.h').write_text(DECODERS_H.format(app=app))
 
     objects = []
@@ -1034,8 +1089,9 @@ try:
         require(result.returncode == 0, f'{Path(source).name} compiles on the host')
         if result.returncode: sys.stdout.write(result.stderr[-3000:])
         objects.append(str(obj))
-    compile_c(shim / 'CommonCrypto/cc_shim.c', ['-I', str(shim / 'CommonCrypto')])
-    compile_c(shim / 'Compression/compression_shim.c', ['-I', str(shim / 'Compression')])
+    if not native:
+        compile_c(shim / 'CommonCrypto/cc_shim.c', ['-I', str(shim / 'CommonCrypto')])
+        compile_c(shim / 'Compression/compression_shim.c', ['-I', str(shim / 'Compression')])
     for name in ['zstd_edu.c', 'lzma_shim.c', 'chunk_zip.c']:
         compile_c(steam / name)
 
@@ -1052,14 +1108,13 @@ try:
                   steam / 'Core/SteamMessageCodec.swift', steam / 'Core/SteamCMSession.swift',
                   steam / 'Content/ContentDecryptor.swift', steam / 'Content/DepotManifest.swift',
                   steam / 'Library/SteamAppInfo.swift', steam / 'Library/SteamLibraryFetcher.swift',
-                  steam / 'Install/AppManifestWriter.swift', app / 'SteamInstall.swift', app / 'SteamKeyValues.swift']
+                  steam / 'Install/AppManifestWriter.swift', app / 'SteamInstall.swift', app / 'SteamKeyValues.swift', app / 'ExternalStorage.swift']
     exe = work / 'check'
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-sanitize=address', '-g', '-o', str(exe),
-                            '-I', str(shim / 'CommonCrypto'), '-I', str(shim / 'Compression'), '-I', str(shim / 'zlib'),
                             '-import-objc-header', str(work / 'decoders.h'),
                             str(work / 'stubs.swift'), str(work / 'checks.swift'), str(work / 'dock.swift'), str(work / 'owned.swift'),
-                            str(work / 'downloader.swift')] + [str(x) for x in production] + objects +
-                           ['-Xlinker', '-lcrypto', '-Xlinker', '-llzma', '-Xlinker', '-lz'], capture_output=True, text=True)
+                            str(work / 'downloader.swift')] + modules + [str(x) for x in production] + objects +
+                           ([] if native else ['-Xlinker', '-lcrypto']) + ['-Xlinker', '-llzma', '-Xlinker', '-lz'], capture_output=True, text=True)
     require(build.returncode == 0, 'the production Steam library, download and decoder code compile on the host')
     if build.returncode:
         sys.stdout.write(build.stderr[-6000:])

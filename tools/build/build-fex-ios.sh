@@ -6,65 +6,51 @@ SRC="$ROOT/FEX"
 BUILD="$SRC/build-ios"
 OUT="$BUILD/FEXCore/Source/libFEXCore.a"
 
-STUB="$BUILD/FEXCore/Source/libJemallocLibs.a"
-create_jemalloc_stub() {
-  # ar refuses to create an archive with no members, so archive a real
-  # (empty) iOS object instead of relying on `ar cr x.a` alone.
-  mkdir -p "$BUILD/FEXCore/Source"
-  local stub_obj="$BUILD/FEXCore/Source/.jemalloc_stub.o"
-  xcrun -sdk iphoneos clang -arch arm64 -c -x c /dev/null -o "$stub_obj"
-  ar cr "$STUB" "$stub_obj"
-  rm -f "$stub_obj"
-}
-
-if [[ -f "$OUT" ]]; then
-  echo "FEX iOS: cached"
-  [[ -f "$STUB" ]] || create_jemalloc_stub
-  exit 0
+required=(
+  "$OUT"
+  "$BUILD/FEXCore/Source/libFEXCore_Base.a"
+  "$BUILD/FEXCore/Source/libJemallocLibs.a"
+  "$BUILD/External/fmt/libfmt.a"
+  "$BUILD/External/cephes/libcephes_128bit.a"
+  "$BUILD/External/SoftFloat-3e/libsoftfloat_3e.a"
+  "$BUILD/External/xxhash/cmake_unofficial/libxxhash.a"
+)
+# The workflow validates the SDK, source pin and build recipe before restoring.
+if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+  complete=true
+  for lib in "${required[@]}"; do [[ -s "$lib" ]] || complete=false; done
+  if "$complete"; then
+    echo "Using the input-matched FEX iOS cache"
+    exit 0
+  fi
 fi
 
-# Apply FEX atomic_ref fallback & host guards
-if [[ -f "$ROOT/tools/patch_fex_atomic_ref.sh" ]]; then
-  bash "$ROOT/tools/patch_fex_atomic_ref.sh" "$SRC"
-fi
+# Options mirror build/fex-ios/build.sh. Do not define FEX_IOS_HOST here: in
+# this FEX fork it selects the code for FEX running as a Windows PE under Wine
+# on iOS (xtajit.dll, xtajit64.dll), which calls Win32 APIs and symbols that
+# only those modules define. The native library the app links uses __APPLE__.
 
-# -DFEX_IOS_HOST=1 selects the iOS host-feature stubs inside this FEX fork
-# (HostFeatures, InvalidationTracker, logging). A build without it compiles
-# but misdetects the host at runtime, so it is required here, not optional.
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
-  -DCMAKE_CXX_STANDARD=20 \
-  -DCMAKE_CXX_STANDARD_REQUIRED=ON \
-  -DCMAKE_CXX_EXTENSIONS=OFF \
   -DCMAKE_SYSTEM_NAME=iOS \
   -DCMAKE_SYSTEM_PROCESSOR=arm64 \
   -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_FLAGS="-DFEX_IOS_HOST=1" \
-  -DCMAKE_CXX_FLAGS="-DFEX_IOS_HOST=1 -std=c++20" \
   -DBUILD_TESTING=OFF \
   -DBUILD_FEX_LINUX_TESTS=OFF \
   -DBUILD_THUNKS=OFF \
   -DBUILD_FEXCONFIG=OFF \
   -DBUILD_STEAM_SUPPORT=OFF \
+  -DENABLE_FEX_ALLOCATOR=OFF \
+  -DENABLE_ASSERTIONS=OFF \
   -DENABLE_LTO=OFF \
   -DENABLE_CCACHE=OFF \
   -DTUNE_CPU=generic \
   -DTUNE_ARCH=generic
 
-cmake --build "$BUILD" --target FEXCore FEXCore_Base --parallel "$JOBS"
-[[ -f "$OUT" ]] || { echo "ERROR: FEX build did not produce $OUT" >&2; exit 1; }
-
-BASE_OUT="$BUILD/FEXCore/Source/libFEXCore_Base.a"
-[[ -f "$BASE_OUT" ]] || { echo "ERROR: FEX build did not produce $BASE_OUT" >&2; exit 1; }
-
-# Create a stub archive for libJemallocLibs.a if not already generated, so any linker invocation succeeds
-[[ -f "$STUB" ]] || create_jemalloc_stub
-echo "=== Verifying libFEXCore_Base.a symbols ==="
-if command -v nm >/dev/null; then
-  nm -gU "$BASE_OUT" 2>/dev/null | grep 'Allocator.*memalign' || {
-    echo "ERROR: FEXCore::Allocator::memalign definition missing from $BASE_OUT" >&2
-    exit 1
-  }
-fi
+# The Xcode project links these archives from FEX/build-ios.
+cmake --build "$BUILD" --target FEXCore FEXCore_Base JemallocLibs fmt cephes_128bit softfloat_3e xxhash --parallel "$JOBS"
+for lib in "${required[@]}"; do
+  [[ -f "$lib" ]] || { echo "ERROR: FEX build did not produce $lib" >&2; exit 1; }
+done

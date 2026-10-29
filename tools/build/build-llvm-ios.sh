@@ -7,37 +7,41 @@ HOST="$ROOT/toolchains/llvm-host-build"
 IOS="$ROOT/toolchains/llvm-ios-build"
 TAG=llvmorg-15.0.7
 
-mkdir -p "$ROOT/toolchains"
-if [[ ! -d "$SRC/.git" ]]; then
-  git clone --depth 1 --branch "$TAG" https://github.com/llvm/llvm-project.git "$SRC"
-fi
-
-if compgen -G "$IOS/lib/libLLVM*.a" >/dev/null; then
-  echo "LLVM iOS: cached"
+# CI restores archives and headers, not the LLVM Git checkout.
+if [[ "${GITHUB_ACTIONS:-}" == true && -s "$IOS/.madeira-cache.sha256" &&
+      -s "$IOS/lib/libLLVMCore.a" && -s "$IOS/lib/libLLVMSupport.a" &&
+      -f "$IOS/include/llvm/Config/llvm-config.h" && -f "$SRC/llvm/include/llvm/IR/Module.h" ]] &&
+   (cd "$IOS" && shasum -a 256 -c .madeira-cache.sha256 >/dev/null 2>&1); then
+  echo "Using the input-matched LLVM iOS cache"
   exit 0
 fi
 
-# Apple ld does not accept --gc-sections. Replace all occurrences of Darwin
-# checks to include iOS, ensure --gc-sections is never used on Apple platforms,
-# and disable dead stripping for the host toolchain (llvm-tblgen).
+mkdir -p "$ROOT/toolchains"
+if [[ ! -e "$SRC/.git" ]]; then
+  [[ ! -e "$SRC" ]] || {
+    echo "ERROR: incomplete LLVM cache or non-Git source directory: $SRC" >&2
+    exit 1
+  }
+  git clone --depth 1 --branch "$TAG" https://github.com/llvm/llvm-project.git "$SRC"
+fi
+
+# Apple ld does not accept --gc-sections. DXMT's documented iOS build requires
+# AddLLVM.cmake to treat iOS like Darwin and use -dead_strip in every check, not only the first.
 python3 - "$SRC/llvm/cmake/modules/AddLLVM.cmake" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 s = p.read_text()
-# Ensure both export symbol lists and dead stripping treat iOS like Darwin
-s = s.replace('MATCHES "Darwin"', 'MATCHES "Darwin|iOS"')
-# Ensure --gc-sections is never added when building on/for Apple platforms
-s = s.replace('LINK_FLAGS " -Wl,--gc-sections"', 'LINK_FLAGS ""')
-p.write_text(s)
+if 'MATCHES "Darwin|iOS"' not in s:
+    old = 'MATCHES "Darwin"'
+    if old not in s:
+        raise SystemExit(f"expected pattern not found in {p}")
+    p.write_text(s.replace(old, 'MATCHES "Darwin|iOS"'))
 PY
 
 if [[ ! -x "$HOST/bin/llvm-tblgen" ]]; then
   cmake -S "$SRC/llvm" -B "$HOST" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_COMPILER="$(xcrun -find clang)" \
-    -DCMAKE_CXX_COMPILER="$(xcrun -find clang++)" \
-    -DLLVM_NO_DEAD_STRIP=ON \
     -DLLVM_INCLUDE_TESTS=OFF \
     -DLLVM_INCLUDE_EXAMPLES=OFF \
     -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -50,7 +54,7 @@ cmake -S "$SRC/llvm" -B "$IOS" -G Ninja \
   -DCMAKE_SYSTEM_NAME=iOS \
   -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=18.0 \
   -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_TABLEGEN="$HOST/bin/llvm-tblgen" \
   -DLLVM_BUILD_UTILS=OFF \
@@ -68,3 +72,4 @@ compgen -G "$IOS/lib/libLLVM*.a" >/dev/null || {
   echo "ERROR: LLVM iOS build produced no static LLVM libraries" >&2
   exit 1
 }
+(cd "$IOS" && shasum -a 256 lib/libLLVM*.a) > "$IOS/.madeira-cache.sha256"
