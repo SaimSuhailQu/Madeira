@@ -1710,6 +1710,8 @@ struct ContentView: View {
                 }
                 Button("Epic sign-in") { devSheet = .epicSignIn }
                     .buttonStyle(.bordered)
+                Button("Ubisoft sign-in") { devSheet = .ubisoftSignIn }
+                    .buttonStyle(.bordered)
                 if MadeiraDock.enabled {
                     Button("Madeira Dock") { devSheet = .dock }
                         .buttonStyle(.bordered)
@@ -2193,6 +2195,7 @@ struct ContentView: View {
             switch sheet {
             case .steamSignIn: SteamSignInView()
             case .epicSignIn: EpicSignInView()
+            case .ubisoftSignIn: UbisoftSignInView()
             case .dock: MadeiraDockView { startDock($0, compactPool: $1) }
             case .allSettings: AllSettingsView()
             }

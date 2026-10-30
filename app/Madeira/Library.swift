@@ -292,6 +292,12 @@ struct LibraryEntry: Codable, Identifiable {
     /// which leaves out the launcher's .NET runtime: it crashed in Wine Mono once
     /// the game had quit, so the session never ended cleanly.
     static let epicAntiCheatOffProgram: [String: String] = ["Sugar": "RocketLeague.exe"]
+    /// A Ubisoft Connect game (UbisoftLibrary.swift): its space id, and the
+    /// Uplay product/launch id Connect's registry records for its install.
+    /// `relativePath` is then its program inside its Connect install folder.
+    /// Optional, so older library files decode.
+    var ubisoftSpaceId: String?
+    var ubisoftLaunchId: Int?
     /// Fastsync's per-game switches, used only while Settings › Sync engine is
     /// Fastsync: "Fast synchronization" (nil = on; off gives this game Wine's
     /// standard sync) and "Fast semaphore waits" (nil = off). Optional, so older
@@ -924,7 +930,9 @@ final class LibraryModel: ObservableObject {
         // one (refreshSteamMetadata) updates that entry.
         if let i = next.firstIndex(where: { $0.id == entry.id }) ??
             next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID }) ??
-            next.firstIndex(where: { entry.epicAppName != nil && $0.epicAppName == entry.epicAppName }) {
+            next.firstIndex(where: { entry.epicAppName != nil && $0.epicAppName == entry.epicAppName }) ??
+            next.firstIndex(where: { entry.ubisoftSpaceId != nil && $0.ubisoftSpaceId == entry.ubisoftSpaceId }) ??
+            next.firstIndex(where: { entry.ubisoftLaunchId != nil && $0.ubisoftLaunchId == entry.ubisoftLaunchId }) {
             // A details sheet may predate an asynchronous metadata refresh.
             if (next[i].metadataChecked ?? .distantPast) > (entry.metadataChecked ?? .distantPast) {
                 entry.folderBytes = next[i].folderBytes; entry.graphicsAPI = next[i].graphicsAPI
@@ -1009,6 +1017,30 @@ final class LibraryModel: ObservableObject {
     func removeEpic(appName: String) {
         guard entries.contains(where: { $0.epicAppName == appName }) else { return }
         persist(entries.filter { $0.epicAppName != appName })
+    }
+    /// A Ubisoft Connect install was found in the prefix (UbisoftLibrary): the
+    /// game gets its library entry, or an existing one follows the install's
+    /// program and keeps its title (the account's name wins), artwork and
+    /// settings.
+    func upsertUbisoft(_ game: UbisoftInstalledGame) {
+        guard !readOnly else { return }
+        var entry = entries.first(where: {
+            (game.spaceId != nil && $0.ubisoftSpaceId == game.spaceId) ||
+                (game.launchId != nil && $0.ubisoftLaunchId == game.launchId)
+        }) ?? LibraryEntry(title: game.title, relativePath: game.programPath, bits: 0)
+        let unchanged = entry.relativePath == game.programPath && entry.folderBytes == game.installBytes
+            && entry.title == game.title && entry.ubisoftSpaceId == game.spaceId && entry.ubisoftLaunchId == game.launchId
+        entry.ubisoftSpaceId = game.spaceId ?? entry.ubisoftSpaceId
+        entry.ubisoftLaunchId = game.launchId ?? entry.ubisoftLaunchId
+        entry.title = game.title
+        entry.relativePath = game.programPath
+        entry.folderBytes = game.installBytes
+        if !unchanged { save(entry) }
+    }
+    /// A Ubisoft game was uninstalled in Connect: its entry goes with its files.
+    func removeUbisoft(spaceId: String) {
+        guard entries.contains(where: { $0.ubisoftSpaceId == spaceId }) else { return }
+        persist(entries.filter { $0.ubisoftSpaceId != spaceId })
     }
     /// Publishes `next` and writes it. The write (encoding the whole library and replacing the file) happens off the
     /// main thread, newest snapshot wins; `wait` writes before returning and reports whether it worked (start-up).
@@ -2891,7 +2923,7 @@ struct LibraryView: View {
     @ObservedObject private var steamLibrary = SteamOwnedLibrary.shared
     private var entries: [LibraryEntry] {
         // Steam games are listed in their own section (SteamGames.swift).
-        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
+        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.ubisoftSpaceId == nil && $0.ubisoftLaunchId == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
         if sort == "added" { return visible.reversed() }
         return visible.sorted {
             if sort == "played", $0.lastPlayed != $1.lastPlayed { return ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast) }
@@ -3072,6 +3104,9 @@ struct LibraryView: View {
             if EpicLibrary.enabled, settingsShow("Epic", "Epic Games", "sign in", "account") {
                 EpicSettingsSection(open: { settingsSheet = $0 })
             }
+            if UbisoftLibrary.enabled, settingsShow("Ubisoft", "Ubisoft Connect", "Uplay", "sign in", "account", "Assassin's Creed") {
+                UbisoftSettingsSection(open: { settingsSheet = $0 })
+            }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow(".NET", "desktop runtime", "dotnet", "WPF", "WinForms", "runtime") { WindowsRuntimeSettingsSection() }
             if settingsShow("Ubisoft", "Uplay", "Epic", "Rockstar", "launcher", "sign in", "Assassin's Creed") { LauncherSupportSettingsSection() }
@@ -3137,6 +3172,7 @@ struct LibraryView: View {
             case .allSettings: AllSettingsView()
             case .steamSignIn: SteamSignInView()
             case .epicSignIn: EpicSignInView()
+            case .ubisoftSignIn: UbisoftSignInView()
             case .dock: MadeiraDockView(start: startDock)
             }
         }
@@ -3188,7 +3224,7 @@ struct LibraryView: View {
                         SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
                     }
-                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil }).isEmpty {
+                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.ubisoftSpaceId == nil && $0.ubisoftLaunchId == nil }).isEmpty {
                     ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
                     cells(entries, width: viewport.size.width)
@@ -3197,6 +3233,12 @@ struct LibraryView: View {
                 // Game details page, the others their download sheet.
                 if EpicLibrary.enabled {
                     EpicGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
+                }
+                // The account's Ubisoft Connect games (UbisoftGames.swift): installed ones
+                // open their Game details page, the others their install sheet, which hands
+                // the install to Ubisoft Connect in the prefix.
+                if UbisoftLibrary.enabled {
+                    UbisoftGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 }
             }
@@ -3906,6 +3948,9 @@ struct LibraryDetail: View {
                     EpicEntrySection(entry: $entry) { leaving = true; dismiss() }
                     EpicCloudSection(appName: appName)
                 }
+                if entry.ubisoftSpaceId != nil || entry.ubisoftLaunchId != nil {
+                    UbisoftEntrySection(entry: $entry)
+                }
                 Section {
                     FPSChoice(mode: $entry.fpsMode)
                     Toggle("Performance overlay", isOn: $entry.performance)
@@ -4400,7 +4445,7 @@ struct MadeiraCredit: View {
 /// MADEIRA_RUNTIME_SETTINGS=0 hides this section.
 /// A sheet opened from Settings; LibraryView presents it from the Form itself.
 enum SettingsSheet: String, Identifiable {
-    case allSettings, steamSignIn, epicSignIn, dock
+    case allSettings, steamSignIn, epicSignIn, ubisoftSignIn, dock
     var id: String { rawValue }
 }
 

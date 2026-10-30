@@ -35,6 +35,9 @@
 		A1000E03 /* SwiftEpic/EpicAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E03 /* EpicAPI.swift */; };
 		A1000E04 /* SwiftEpic/EpicFormats.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E04 /* EpicFormats.swift */; };
 		A1000E05 /* SwiftEpic/EpicDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E05 /* EpicDownloader.swift */; };
+		A1000B01 /* UbisoftLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000B01 /* UbisoftLibrary.swift */; };
+		A1000B02 /* UbisoftGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000B02 /* UbisoftGames.swift */; };
+		A1000B03 /* SwiftUbisoft/UbisoftAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000B03 /* UbisoftAPI.swift */; };
 		A1000602 /* SteamDownloadBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000602 /* SteamDownloadBackground.swift */; };
 		A1000600 /* SteamInstall.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000600 /* SteamInstall.swift */; };
 		A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000609 /* ContentDecryptor.swift */; };
@@ -250,6 +253,9 @@
 		A2000E03 /* EpicAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicAPI.swift"; sourceTree = "<group>"; };
 		A2000E04 /* EpicFormats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicFormats.swift"; sourceTree = "<group>"; };
 		A2000E05 /* EpicDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicDownloader.swift"; sourceTree = "<group>"; };
+		A2000B01 /* UbisoftLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "UbisoftLibrary.swift"; sourceTree = "<group>"; };
+		A2000B02 /* UbisoftGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "UbisoftGames.swift"; sourceTree = "<group>"; };
+		A2000B03 /* UbisoftAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftUbisoft/UbisoftAPI.swift"; sourceTree = "<group>"; };
 		A2000602 /* SteamDownloadBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamDownloadBackground.swift"; sourceTree = "<group>"; };
 		A2000600 /* SteamInstall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamInstall.swift"; sourceTree = "<group>"; };
 		A2000609 /* ContentDecryptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/ContentDecryptor.swift"; sourceTree = "<group>"; };
@@ -510,6 +516,9 @@
 				A2000E03 /* EpicAPI.swift */,
 				A2000E04 /* EpicFormats.swift */,
 				A2000E05 /* EpicDownloader.swift */,
+				A2000B01 /* UbisoftLibrary.swift */,
+				A2000B02 /* UbisoftGames.swift */,
+				A2000B03 /* UbisoftAPI.swift */,
 				A2000E07 /* EpicCloudSaves.swift */,
 				A2000E06 /* EpicCloud.swift */,
 				A2000920 /* ExternalDrives.swift */,
@@ -889,6 +898,9 @@
 				A1000E03 /* SwiftEpic/EpicAPI.swift in Sources */,
 				A1000E04 /* SwiftEpic/EpicFormats.swift in Sources */,
 				A1000E05 /* SwiftEpic/EpicDownloader.swift in Sources */,
+				A1000B01 /* UbisoftLibrary.swift in Sources */,
+				A1000B02 /* UbisoftGames.swift in Sources */,
+				A1000B03 /* SwiftUbisoft/UbisoftAPI.swift in Sources */,
 				A1000E07 /* EpicCloudSaves.swift in Sources */,
 				A1000E06 /* EpicCloud.swift in Sources */,
 				A1000920 /* ExternalDrives.swift in Sources */,
