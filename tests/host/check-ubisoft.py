@@ -80,8 +80,10 @@ require("$0.ubisoftSpaceId == nil" in library, "Other games keeps Ubisoft games 
 require("var ubisoftSpaceId: String?" in library and "var ubisoftLaunchId: Int?" in library,
         "LibraryEntry carries the Ubisoft fields")
 games = (app / "UbisoftGames.swift").read_text()
-require("customUserAgent" in games and "desktopUserAgent" in games,
-        "sign-in web view presents a desktop user agent (Ubisoft serves phones an app interstitial)")
+require("customUserAgent" in games and "desktopUserAgent" in games and "Macintosh" in games,
+        "sign-in web view presents a desktop Safari user agent (desktop page, engine-consistent)")
+require("websiteDataStore = .default()" in games,
+        "sign-in web view keeps a persistent data store (the anti-bot check's cookies must survive)")
 require("runJavaScriptAlertPanelWithMessage" in games and "runJavaScriptConfirmPanelWithMessage" in games,
         "sign-in web view answers JavaScript dialogs")
 

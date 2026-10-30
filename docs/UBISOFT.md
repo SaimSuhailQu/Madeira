@@ -26,12 +26,19 @@ ubi-services reference (wnc-replay.github.io/ubi-docs).
 ## Account and game files
 
 Sign in under Settings > Ubisoft Connect. Madeira opens Ubisoft's own login
-page in a web view that presents a desktop Chrome user agent — with a phone
-user agent the page serves an app interstitial ("Sign in to Ubisoft Connect
-to continue") whose button deep-links to the Connect app instead of showing
-the login form, which goes nowhere in a web view (device report,
-2026-10-30); the desktop presentation is also what the GOG integration's
-browser uses. When the login finishes, the page's local storage holds the session ticket and
+page in a web view that presents a desktop Safari user agent, in the
+persistent website data store. Both choices come from device reports
+(2026-10-30): with a phone user agent the page serves an app interstitial
+("Sign in to Ubisoft Connect to continue") whose button deep-links to the
+Connect app instead of showing the login form, which goes nowhere in a web
+view; with a desktop *Chrome* agent Ubisoft's anti-bot filter blocked the
+sheet outright ("Access is temporarily restricted") while the same login in
+the phone's real browser went through — the disguise claimed a Windows
+browser over an iPhone's fingerprints, and the mismatch itself reads as a
+bot. Desktop Safari claims the desktop page variant while staying in the
+WebKit family the view actually runs, and the persistent store lets the
+filter's own cookies survive between attempts so a passed check counts;
+signing out removes Ubisoft's website data with the ticket. When the login finishes, the page's local storage holds the session ticket and
 remember-me ticket, which Madeira reads. The password and any two-factor step
 stay inside Ubisoft's page and are never seen or stored. Tickets are bound to
 the club app id the login used, and every ubi-services call sends it. The

@@ -393,7 +393,7 @@ struct UbisoftSignInView: View {
                 if ubisoft.signedIn {
                     Form {
                         LabeledContent("Signed in as", value: ubisoft.accountName ?? "Ubisoft account")
-                        Button("Sign out", role: .destructive) { ubisoft.signOut() }
+                        Button("Sign out", role: .destructive) { ubisoft.signOut(); Self.clearUbisoftWebsiteData() }
                     }
                 } else {
                     UbisoftLoginWebView(reload: reload) { capture in submit(capture) }
@@ -415,9 +415,23 @@ struct UbisoftSignInView: View {
                     }
                 }
             }
+            // Dismissing a failure does not reload the page: repeated loads in
+            // quick succession are one of the behaviours Ubisoft's anti-bot
+            // filter names on its restriction page. The Reload button stays
+            // available for a deliberate retry.
             .alert("Ubisoft Connect", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-                Button("OK", role: .cancel) { failure = nil; reload += 1 }
+                Button("OK", role: .cancel) { failure = nil }
             } message: { Text(failure ?? "") }
+        }
+    }
+
+    /// Sign-out forgets the web session too: Ubisoft's cookies and local
+    /// storage in the shared store go with the Keychain ticket.
+    private static func clearUbisoftWebsiteData() {
+        let store = WKWebsiteDataStore.default()
+        store.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
+            let ubisoft = records.filter { $0.displayName.lowercased().contains("ubisoft") }
+            store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: ubisoft) {}
         }
     }
 
@@ -441,29 +455,42 @@ struct UbisoftSignInView: View {
     }
 }
 
-/// WKWebView with Ubisoft's login page, in a private (non-persistent) data
-/// store. The coordinator polls the page's local storage after each load and
-/// on a timer, because the login finishes with in-page redirects.
+/// WKWebView with Ubisoft's login page. The coordinator polls the page's
+/// local storage after each load and on a timer, because the login finishes
+/// with in-page redirects.
 ///
-/// The view presents a desktop Chrome user agent: with a phone user agent
-/// connect.ubisoft.com serves an app interstitial ("Sign in to Ubisoft
-/// Connect to continue") whose button deep-links to the Connect app instead
-/// of showing the login form — in a web view that tap goes nowhere and the
-/// prompt loops (device report, 2026-10-30). The GOG Galaxy integration,
-/// whose flow this mirrors, likewise runs the page in a desktop browser.
+/// The view presents a desktop Safari user agent, and the choice matters
+/// twice over (device reports, 2026-10-30):
+///
+/// - With a phone user agent the page serves an app interstitial ("Sign in
+///   to Ubisoft Connect to continue") whose button deep-links to the Connect
+///   app instead of showing the login form — in a web view that tap goes
+///   nowhere and the prompt loops. A desktop-class agent gets the form.
+/// - The first fix presented desktop *Chrome* on Windows, and Ubisoft's
+///   anti-bot filter then blocked the sheet outright ("Access is
+///   temporarily restricted") while the same login in the phone's real
+///   browser went through: the disguise claimed a Windows browser while
+///   every fingerprint underneath stayed iPhone WebKit, and that mismatch
+///   is itself a bot signal. Desktop Safari claims a desktop page variant
+///   but stays in the engine family the view actually runs, which is the
+///   consistent identity a real iPad or Mac presents.
+///
+/// The data store is the persistent default one, like a browser's: the
+/// filter's own cookies have to survive between attempts for a passed
+/// check to count, and the login's local storage outlives the sheet.
+/// Signing out removes Ubisoft's website data along with the ticket.
 struct UbisoftLoginWebView: UIViewRepresentable {
     var reload: Int
     var onCapture: (String) -> Void
 
-    /// Desktop Chrome on Windows — the user agent the GOG integration's
-    /// browser presents to Ubisoft's web auth.
-    static let desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.127 Safari/537.36"
+    /// Desktop Safari (macOS) — desktop page variant, WebKit-consistent.
+    static let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15"
 
     func makeCoordinator() -> Coordinator { Coordinator(onCapture: onCapture) }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
+        config.websiteDataStore = .default()
         let view = WKWebView(frame: .zero, configuration: config)
         view.customUserAgent = Self.desktopUserAgent
         view.navigationDelegate = context.coordinator
