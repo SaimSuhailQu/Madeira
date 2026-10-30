@@ -79,6 +79,11 @@ require("UbisoftEntrySection" in library, "Game details shows the Ubisoft sectio
 require("$0.ubisoftSpaceId == nil" in library, "Other games keeps Ubisoft games out")
 require("var ubisoftSpaceId: String?" in library and "var ubisoftLaunchId: Int?" in library,
         "LibraryEntry carries the Ubisoft fields")
+games = (app / "UbisoftGames.swift").read_text()
+require("customUserAgent" in games and "desktopUserAgent" in games,
+        "sign-in web view presents a desktop user agent (Ubisoft serves phones an app interstitial)")
+require("runJavaScriptAlertPanelWithMessage" in games and "runJavaScriptConfirmPanelWithMessage" in games,
+        "sign-in web view answers JavaScript dialogs")
 
 print("FAILURES:", failures)
 sys.exit(1 if failures else 0)

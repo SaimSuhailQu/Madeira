@@ -2,6 +2,7 @@
 // Madeira Converter Exception: see LICENSE-EXCEPTION.md
 
 import SwiftUI
+import UIKit
 import WebKit
 
 // The library's Ubisoft Connect section, a game's sheet, its Game details
@@ -443,9 +444,20 @@ struct UbisoftSignInView: View {
 /// WKWebView with Ubisoft's login page, in a private (non-persistent) data
 /// store. The coordinator polls the page's local storage after each load and
 /// on a timer, because the login finishes with in-page redirects.
+///
+/// The view presents a desktop Chrome user agent: with a phone user agent
+/// connect.ubisoft.com serves an app interstitial ("Sign in to Ubisoft
+/// Connect to continue") whose button deep-links to the Connect app instead
+/// of showing the login form — in a web view that tap goes nowhere and the
+/// prompt loops (device report, 2026-10-30). The GOG Galaxy integration,
+/// whose flow this mirrors, likewise runs the page in a desktop browser.
 struct UbisoftLoginWebView: UIViewRepresentable {
     var reload: Int
     var onCapture: (String) -> Void
+
+    /// Desktop Chrome on Windows — the user agent the GOG integration's
+    /// browser presents to Ubisoft's web auth.
+    static let desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.127 Safari/537.36"
 
     func makeCoordinator() -> Coordinator { Coordinator(onCapture: onCapture) }
 
@@ -453,6 +465,7 @@ struct UbisoftLoginWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         let view = WKWebView(frame: .zero, configuration: config)
+        view.customUserAgent = Self.desktopUserAgent
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
         view.load(URLRequest(url: UbisoftAPI.loginURL))
@@ -515,6 +528,49 @@ struct UbisoftLoginWebView: UIViewRepresentable {
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
             if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
             return nil
+        }
+
+        // JavaScript panels: without a delegate implementation WebKit drops
+        // the page's dialogs and its script waits on an answer that never
+        // comes, which reads on screen as a button that does nothing.
+        func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                     initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+            present(webView, message: message, buttons: [("OK", true)], prompt: nil) { _, _ in completionHandler() }
+        }
+
+        func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                     initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+            present(webView, message: message, buttons: [("Cancel", false), ("OK", true)], prompt: nil) { accepted, _ in
+                completionHandler(accepted)
+            }
+        }
+
+        func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
+                     initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+            present(webView, message: prompt, buttons: [("Cancel", false), ("OK", true)], prompt: defaultText ?? "") { accepted, text in
+                completionHandler(accepted ? (text ?? defaultText) : nil)
+            }
+        }
+
+        /// Shows one alert for a JavaScript panel. The completion always runs
+        /// exactly once — WebKit suspends the page's script until it does.
+        private func present(_ webView: WKWebView, message: String, buttons: [(String, Bool)],
+                             prompt: String?, completion: @escaping (Bool, String?) -> Void) {
+            guard let presenter = Self.topPresenter(from: webView) else { completion(false, nil); return }
+            let alert = UIAlertController(title: "Ubisoft Connect", message: message, preferredStyle: .alert)
+            if prompt != nil { alert.addTextField { $0.text = prompt } }
+            for (title, accepted) in buttons {
+                alert.addAction(UIAlertAction(title: title, style: accepted ? .default : .cancel) { _ in
+                    completion(accepted, alert.textFields?.first?.text)
+                })
+            }
+            presenter.present(alert, animated: true)
+        }
+
+        private static func topPresenter(from view: UIView) -> UIViewController? {
+            var top = view.window?.rootViewController
+            while let presented = top?.presentedViewController { top = presented }
+            return top
         }
     }
 }

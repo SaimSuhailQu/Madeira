@@ -26,7 +26,12 @@ ubi-services reference (wnc-replay.github.io/ubi-docs).
 ## Account and game files
 
 Sign in under Settings > Ubisoft Connect. Madeira opens Ubisoft's own login
-page; when it finishes, the page's local storage holds the session ticket and
+page in a web view that presents a desktop Chrome user agent — with a phone
+user agent the page serves an app interstitial ("Sign in to Ubisoft Connect
+to continue") whose button deep-links to the Connect app instead of showing
+the login form, which goes nowhere in a web view (device report,
+2026-10-30); the desktop presentation is also what the GOG integration's
+browser uses. When the login finishes, the page's local storage holds the session ticket and
 remember-me ticket, which Madeira reads. The password and any two-factor step
 stay inside Ubisoft's page and are never seen or stored. Tickets are bound to
 the club app id the login used, and every ubi-services call sends it. The
