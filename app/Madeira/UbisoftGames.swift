@@ -387,6 +387,11 @@ struct UbisoftSignInView: View {
     @State private var failure: String?
     @State private var reload = 0
     @State private var status = "Sign in on Ubisoft's page — this sheet finishes by itself when you're done."
+    @State private var email = ""
+    @State private var password = ""
+    @State private var code = ""
+    @State private var needsCode = false
+    @State private var useWebPage = false
 
     var body: some View {
         NavigationStack {
@@ -396,7 +401,7 @@ struct UbisoftSignInView: View {
                         LabeledContent("Signed in as", value: ubisoft.accountName ?? "Ubisoft account")
                         Button("Sign out", role: .destructive) { ubisoft.signOut(); Self.clearUbisoftWebsiteData() }
                     }
-                } else {
+                } else if useWebPage {
                     VStack(spacing: 0) {
                         UbisoftLoginWebView(reload: reload, onStatus: { status = $0 }) { capture in submit(capture) }
                             .ignoresSafeArea(edges: .bottom)
@@ -413,13 +418,59 @@ struct UbisoftSignInView: View {
                             .padding(.horizontal, 16).padding(.vertical, 8)
                             .background(.bar)
                     }
+                } else {
+                    Form {
+                        Section {
+                            TextField("Email address", text: $email)
+                                .textContentType(.username)
+                                .keyboardType(.emailAddress)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                            SecureField("Password", text: $password)
+                                .textContentType(.password)
+                        } header: {
+                            Text("Sign in")
+                        } footer: {
+                            Text("Your email and password go only to Ubisoft's own server, over HTTPS — the same sign-in its mobile app makes. The password is never stored; Madeira keeps only the session ticket, in this device's Keychain.")
+                        }
+                        if needsCode {
+                            Section {
+                                TextField("6-digit code", text: $code)
+                                    .textContentType(.oneTimeCode)
+                                    .keyboardType(.numberPad)
+                                Button("Verify code") { submitCode() }
+                                    .disabled(busy || code.trimmingCharacters(in: .whitespaces).count < 6)
+                            } header: {
+                                Text("2-Step Verification")
+                            } footer: {
+                                Text("Ubisoft is protecting this account with a second step. Enter the current code from your authenticator app or email.")
+                            }
+                        } else {
+                            Section {
+                                Button("Sign in") { submitCredentials() }
+                                    .disabled(busy || email.isEmpty || password.isEmpty)
+                            }
+                        }
+                        Section {
+                            Button("Use Ubisoft's web page instead") { useWebPage = true }
+                        } footer: {
+                            Text("The web page signs in inside Ubisoft's own login page, for accounts the direct sign-in refuses. Its heavy pages can stall in an embedded view — the direct form above is the reliable route.")
+                        }
+                    }
+                    .overlay {
+                        if busy {
+                            ProgressView("Signing in…").padding(20)
+                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                        }
+                    }
                 }
             }
             .navigationTitle("Ubisoft Connect").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                if !ubisoft.signedIn {
-                    ToolbarItem(placement: .primaryAction) {
+                if !ubisoft.signedIn, useWebPage {
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        Button("Form") { useWebPage = false }
                         Button("Reload", systemImage: "arrow.clockwise") { reload += 1 }
                     }
                 }
@@ -441,6 +492,45 @@ struct UbisoftSignInView: View {
         store.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
             let ubisoft = records.filter { $0.displayName.lowercased().contains("ubisoft") }
             store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: ubisoft) {}
+        }
+    }
+
+    /// Direct sign-in, step one: email + password to Ubisoft's session
+    /// service. A two-factor answer is not a failure — it opens the code
+    /// field; the API actor keeps the pending exchange.
+    private func submitCredentials() {
+        guard !busy else { return }
+        busy = true
+        Task {
+            do {
+                try await ubisoft.signIn(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password)
+                busy = false
+                password = ""
+                dismiss()
+            } catch UbisoftAPIError.twoFactor {
+                busy = false
+                needsCode = true
+            } catch {
+                busy = false
+                failure = error.localizedDescription
+            }
+        }
+    }
+
+    /// Direct sign-in, step two: the 2-Step Verification code.
+    private func submitCode() {
+        guard !busy else { return }
+        busy = true
+        Task {
+            do {
+                try await ubisoft.completeTwoFactor(code: code.trimmingCharacters(in: .whitespacesAndNewlines))
+                busy = false
+                password = ""; code = ""
+                dismiss()
+            } catch {
+                busy = false
+                failure = error.localizedDescription
+            }
         }
     }
 

@@ -25,30 +25,38 @@ ubi-services reference (wnc-replay.github.io/ubi-docs).
 
 ## Account and game files
 
-Sign in under Settings > Ubisoft Connect. Madeira opens Ubisoft's own login
-page in a web view that presents a desktop Safari user agent, in the
-persistent website data store. Both choices come from device reports
-(2026-10-30): with a phone user agent the page serves an app interstitial
-("Sign in to Ubisoft Connect to continue") whose button deep-links to the
-Connect app instead of showing the login form, which goes nowhere in a web
-view; with a desktop *Chrome* agent Ubisoft's anti-bot filter blocked the
-sheet outright ("Access is temporarily restricted") while the same login in
-the phone's real browser went through — the disguise claimed a Windows
-browser over an iPhone's fingerprints, and the mismatch itself reads as a
-bot. Desktop Safari claims the desktop page variant while staying in the
-WebKit family the view actually runs, and the persistent store lets the
-filter's own cookies survive between attempts so a passed check counts;
-signing out removes Ubisoft's website data with the ticket. When the login finishes, the page's local storage holds the session ticket and
-remember-me ticket, which Madeira reads. If the post-login page stalls
-blank — its app shell can wedge its own script context — Madeira moves the
-view to Ubisoft's `change_domain` relay page, a light document on the same
-origin where the same storage answers; the GOG integration performs the
-same handoff. The sheet narrates which stage it is in under the page. The password and any two-factor step
-stay inside Ubisoft's page and are never seen or stored. Tickets are bound to
-the club app id the login used, and every ubi-services call sends it. The
-ticket lives in one Keychain item for this device only; refresh is a ticket
-exchange (`PUT /v3/profiles/sessions`), with the remember-me ticket
-(`rm_v1`) as the fallback. Ubisoft checks ownership when it serves the owned
+Sign in under Settings > Ubisoft Connect, with the account's email and
+password. Madeira sends them to Ubisoft's session service in one HTTPS
+call — `POST /v3/profiles/sessions`, the login Ubisoft's own mobile app
+makes — and keeps only the ticket it buys. The password builds the
+request and is never stored or logged. If the club app id refuses a
+password login, the same credentials go in under the mobile app id and
+the session is exchanged for a club-bound one, because tickets are bound
+to the app id that issued them. An account with 2-Step Verification
+answers the login with a two-factor ticket instead of a session; the
+sheet then asks for the 6-digit code and completes the same call
+(`Ubi_2fa_v1` + `ubi-2facode`). The ticket lives in one Keychain item
+for this device only; refresh is a ticket exchange
+(`PUT /v3/profiles/sessions`), with the remember-me ticket (`rm_v1`)
+as the fallback.
+
+The sheet also offers the older route, Ubisoft's own login page in a web
+view, for accounts the direct sign-in refuses. Device reports
+(2026-10-30/31) showed why it is the fallback and not the front door:
+with a phone user agent the page serves an app interstitial whose button
+deep-links to the Connect app instead of showing the form; dressed as
+desktop Chrome, Ubisoft's anti-bot filter blocked the sheet while the
+same login in the phone's real browser went through; dressed as desktop
+Safari (the presentation it keeps — desktop page variant, WebKit family,
+persistent website data store) the login completed, but the heavy
+post-login page stalled blank more than once, its wedged script context
+never answering the session read — Madeira then moves the view to
+Ubisoft's `change_domain` relay page, a light document on the same
+origin where the same storage answers, the handoff the GOG integration
+performs. In that flow the password stays inside Ubisoft's page and is
+never seen by Madeira at all.
+
+Ubisoft checks ownership when it serves the owned
 list: `POST /v1/profiles/me/uplay/graphql`, the club `AllGames` query, filtered
 to games whose owned platform groups include PC.
 

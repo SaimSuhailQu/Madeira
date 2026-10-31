@@ -117,7 +117,23 @@ struct UbisoftInstalledGame: Codable, Sendable, Identifiable {
 
     /// A session captured from Ubisoft's login page (UbisoftSignInView).
     func signIn(capture: UbisoftSession) async throws {
-        let session = try await api.signIn(capture: capture)
+        try await adopt(api.signIn(capture: capture))
+    }
+
+    /// Direct sign-in with the account's email and password (UbisoftAPI
+    /// talks to Ubisoft's session service; the password is never stored).
+    /// A `UbisoftAPIError.twoFactor` from here means: ask for the code and
+    /// call `completeTwoFactor(code:)`.
+    func signIn(email: String, password: String) async throws {
+        try await adopt(api.signIn(email: email, password: password))
+    }
+
+    /// Completes a direct sign-in with the 2-Step Verification code.
+    func completeTwoFactor(code: String) async throws {
+        try await adopt(api.completeTwoFactor(code: code))
+    }
+
+    private func adopt(_ session: UbisoftSession) async {
         signedIn = true
         accountName = session.username
         accountID = session.userId

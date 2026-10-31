@@ -7,13 +7,16 @@ import Security
 // Ubisoft's ubi-services (docs/UBISOFT.md): the same HTTPS endpoints Ubisoft
 // Connect and the connect.ubisoft.com web login use, and that the GOG Galaxy
 // Uplay integration (FriendsOfGalaxy/galaxy-integration-uplay) uses on the
-// desktop. Sign-in is Ubisoft's own web login: when it finishes, the page's
-// local storage holds the session ticket and the remember-me ticket, which
-// Madeira reads and keeps in one Keychain item. Madeira never sees or stores
-// the account password, and two-factor sign-ins complete inside the web view.
-// Tickets are bound to the app id they were issued for, so every call sends
-// the same club app id the web login used. Log lines name methods and short
-// reason codes only, never a ticket, name or account id.
+// desktop. Sign-in is direct by default: the account's email and password go
+// to Ubisoft's session service in one HTTPS call — the login its own mobile
+// app makes — and Madeira keeps only the ticket that buys, in one Keychain
+// item; the password itself is never stored or logged. (The older web-page
+// sign-in remains as a fallback; there the password stays inside Ubisoft's
+// page and is never seen at all.) Two-factor codes complete the same call.
+// Tickets are bound to the app id they were issued for, so session calls
+// send the club app id, exchanging a ticket first when it was issued under
+// another app id. Log lines name methods and short reason codes only, never
+// a ticket, name or account id.
 
 /// The signed-in account, as stored in the Keychain.
 struct UbisoftSession: Codable, Sendable {
@@ -30,12 +33,19 @@ enum UbisoftAPIError: LocalizedError, Equatable {
     case signedOut
     case http(Int)
     case invalid(String)
+    /// The credentials (or a 2FA code) were refused by the session service.
+    case rejected(Int)
+    /// The login needs the account's 2-Step Verification code next. The
+    /// pending exchange is kept inside the API actor, not in this value.
+    case twoFactor
 
     var errorDescription: String? {
         switch self {
         case .signedOut: return "Sign in to Ubisoft Connect to continue."
         case .http(let status): return "Ubisoft's server answered with HTTP \(status). Try again later."
         case .invalid(let what): return "Ubisoft sent an unexpected answer (\(what))."
+        case .rejected: return "Ubisoft refused those sign-in details. Check them and try again."
+        case .twoFactor: return "Enter the 2-Step Verification code for this account."
         }
     }
 
@@ -45,6 +55,8 @@ enum UbisoftAPIError: LocalizedError, Equatable {
         case .signedOut: return "signed-out"
         case .http(let status): return "http-\(status)"
         case .invalid(let what): return "invalid-\(what)"
+        case .rejected(let status): return "rejected-\(status)"
+        case .twoFactor: return "two-factor"
         }
     }
 }
@@ -243,9 +255,118 @@ actor UbisoftAPI {
 
     func signOut() {
         refreshing?.cancel(); refreshing = nil
+        pendingTwoFactor = nil
         session = nil; loaded = true
         UbisoftTokenStore.delete()
         UbisoftLog.event("[ubisoft-signin] signed out")
+    }
+
+    // MARK: Direct sign-in
+
+    /// The app id Ubisoft's own mobile app presents for password logins —
+    /// the documented first hop for credential sign-in. Used only when the
+    /// club app id refuses a password login; that session is then exchanged
+    /// for a club-bound one before anything is stored.
+    static let authAppId = "4391c956-8943-48eb-8859-07b0778f47b9"
+
+    /// A 2-Step Verification exchange in flight: the limited ticket and the
+    /// app id the password login used (the completion must use the same).
+    private var pendingTwoFactor: (ticket: String, clubDirect: Bool)?
+
+    /// Signs in with the account's email and password, sent only to
+    /// Ubisoft's session service over HTTPS — the login its mobile app
+    /// makes, with no web page involved. The password builds the request's
+    /// Basic header and is never stored or logged; the ticket it buys is
+    /// kept exactly like a web-login ticket. Throws
+    /// `UbisoftAPIError.twoFactor` when the account asks for its code;
+    /// then call `completeTwoFactor(code:)`.
+    func signIn(email: String, password: String) async throws -> UbisoftSession {
+        let basic = Data("\(email):\(password)".utf8).base64EncodedString()
+        do {
+            let json = try await passwordLogin(appId: Self.appId, basic: basic, method: "login-password")
+            return try await finishLogin(json, clubDirect: true, method: "login-password")
+        } catch UbisoftAPIError.rejected {
+            // The club app id takes its logins through the web page, not a
+            // password — go in through the mobile app id and exchange.
+            let json = try await passwordLogin(appId: Self.authAppId, basic: basic, method: "login-password-alt")
+            return try await finishLogin(json, clubDirect: false, method: "login-password-alt")
+        }
+    }
+
+    /// Completes a two-factor sign-in with the account's 6-digit code.
+    func completeTwoFactor(code: String) async throws -> UbisoftSession {
+        guard let pending = pendingTwoFactor else { throw UbisoftAPIError.invalid("2fa-state") }
+        var request = sessionsRequest(appId: pending.clubDirect ? Self.appId : Self.authAppId)
+        request.httpMethod = "POST"
+        request.setValue("Ubi_2fa_v1 t=\(pending.ticket)", forHTTPHeaderField: "Authorization")
+        request.setValue(code, forHTTPHeaderField: "ubi-2facode")
+        request.httpBody = Data("{\"rememberMe\": true}".utf8)
+        let json = try await loginObject(request, method: "login-2fa")
+        return try await finishLogin(json, clubDirect: pending.clubDirect, method: "login-2fa")
+    }
+
+    private func passwordLogin(appId: String, basic: String, method: String) async throws -> [String: Any] {
+        var request = sessionsRequest(appId: appId)
+        request.httpMethod = "POST"
+        request.setValue("Basic \(basic)", forHTTPHeaderField: "Authorization")
+        request.httpBody = Data("{\"rememberMe\": true}".utf8)
+        return try await loginObject(request, method: method)
+    }
+
+    /// A login answer: a full session (adopted, exchanged first when it was
+    /// issued under the mobile app id), or the two-factor ask — a 200 with
+    /// no ticket but a two-factor ticket is not a failed login.
+    private func finishLogin(_ json: [String: Any], clubDirect: Bool, method: String) async throws -> UbisoftSession {
+        if let ticket = json["ticket"] as? String, !ticket.isEmpty {
+            pendingTwoFactor = nil
+            if clubDirect {
+                let session = try adoptJSON(json, method: method)
+                UbisoftLog.event("[ubisoft-signin] signed in (direct)")
+                return session
+            }
+            let session = try await exchange(ticket: ticket, sessionId: json["sessionId"] as? String)
+            UbisoftLog.event("[ubisoft-signin] signed in (direct)")
+            return session
+        }
+        if let twoFactor = json["twoFactorAuthenticationTicket"] as? String, !twoFactor.isEmpty {
+            pendingTwoFactor = (ticket: twoFactor, clubDirect: clubDirect)
+            throw UbisoftAPIError.twoFactor
+        }
+        throw UbisoftAPIError.invalid(method)
+    }
+
+    /// Exchanges a session issued under another app id for one bound to the
+    /// club app id (POST /v3/profiles/sessions with the ticket).
+    private func exchange(ticket: String, sessionId: String?) async throws -> UbisoftSession {
+        var request = sessionsRequest(appId: Self.appId)
+        request.httpMethod = "POST"
+        request.setValue("Ubi_v1 t=\(ticket)", forHTTPHeaderField: "Authorization")
+        if let sessionId { request.setValue(sessionId, forHTTPHeaderField: "Ubi-SessionId") }
+        request.httpBody = Data("{\"rememberMe\": true}".utf8)
+        return try await adopt(request, method: "login-exchange")
+    }
+
+    private func sessionsRequest(appId: String) -> URLRequest {
+        var request = URLRequest(url: URL(string: Self.servicesHost + "/v3/profiles/sessions")!)
+        request.setValue(appId, forHTTPHeaderField: "Ubi-AppId")
+        request.setValue("uplay", forHTTPHeaderField: "Ubi-RequestedPlatformType")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
+    /// The login calls' own send: a 401 or 403 here means the credentials
+    /// (or the code) were refused — not the stored-session sign-out the
+    /// shared send() reports.
+    private func loginObject(_ request: URLRequest, method: String) async throws -> [String: Any] {
+        let (data, response) = try await http.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 401 || status == 403 { throw UbisoftAPIError.rejected(status) }
+        if status >= 400 || status == 0 {
+            UbisoftLog.event("[ubisoft-api] \(method) failed reason=http-\(status)")
+            throw UbisoftAPIError.http(status)
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw UbisoftAPIError.invalid(method) }
+        return json
     }
 
     /// A session whose ticket is good for at least five more minutes.
@@ -297,7 +418,12 @@ actor UbisoftAPI {
 
     /// Sends a session request and adopts its answer as the stored session.
     private func adopt(_ request: URLRequest, method: String) async throws -> UbisoftSession {
-        let json = try await object(request, method: method)
+        try adoptJSON(await object(request, method: method), method: method)
+    }
+
+    /// Adopts a session payload as the stored session (refresh answers, the
+    /// ticket exchange, a completed direct login).
+    private func adoptJSON(_ json: [String: Any], method: String) throws -> UbisoftSession {
         guard let ticket = json["ticket"] as? String, !ticket.isEmpty,
               let sessionId = json["sessionId"] as? String, !sessionId.isEmpty else { throw UbisoftAPIError.invalid(method) }
         var next = stored() ?? UbisoftSession(userId: "", username: "", ticket: ticket, sessionId: sessionId, rememberMeTicket: nil, expiration: nil)

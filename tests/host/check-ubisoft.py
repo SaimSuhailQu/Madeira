@@ -90,6 +90,11 @@ require("change_domain" in games and "handedOff" in games,
         "sign-in capture falls back to the relay page when the post-login page stalls")
 require("deepValue" in api and "captureParts" in api,
         "session parsing searches nested payloads and reports storage parts by label only")
+require("signIn(email:" in api and "Ubi_2fa_v1" in api and "completeTwoFactor" in api,
+        "direct sign-in (password login + 2FA completion) is implemented in the API layer")
+require("SecureField" in games and "submitCredentials" in games and "submitCode" in games,
+        "sign-in sheet leads with the direct form and keeps the web page as fallback")
+require("never stored" in games, "the form states the password is never stored")
 
 print("FAILURES:", failures)
 sys.exit(1 if failures else 0)
