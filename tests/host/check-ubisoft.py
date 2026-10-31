@@ -86,6 +86,10 @@ require("websiteDataStore = .default()" in games,
         "sign-in web view keeps a persistent data store (the anti-bot check's cookies must survive)")
 require("runJavaScriptAlertPanelWithMessage" in games and "runJavaScriptConfirmPanelWithMessage" in games,
         "sign-in web view answers JavaScript dialogs")
+require("change_domain" in games and "handedOff" in games,
+        "sign-in capture falls back to the relay page when the post-login page stalls")
+require("deepValue" in api and "captureParts" in api,
+        "session parsing searches nested payloads and reports storage parts by label only")
 
 print("FAILURES:", failures)
 sys.exit(1 if failures else 0)

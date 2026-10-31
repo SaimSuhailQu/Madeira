@@ -138,11 +138,18 @@ actor UbisoftAPI {
         var merged: [String: Any] = [:]
         for key in ["loginData", "rememberMe", "lastProfile"] {
             guard let raw = outer[key] else { continue }
-            if let object = raw as? [String: Any] {
-                for (name, value) in object where merged[name] == nil { merged[name] = value }
-            } else if let string = raw as? String, let inner = string.data(using: .utf8),
-                      let object = try? JSONSerialization.jsonObject(with: inner) as? [String: Any] {
-                for (name, value) in object where merged[name] == nil { merged[name] = value }
+            var object: [String: Any]?
+            if let dict = raw as? [String: Any] { object = dict }
+            else if let string = raw as? String, let inner = string.data(using: .utf8) {
+                object = try? JSONSerialization.jsonObject(with: inner) as? [String: Any]
+            }
+            guard let object else { continue }
+            for (name, value) in object where merged[name] == nil { merged[name] = value }
+            // Ubisoft has nested the payload before; a key missing at the top
+            // level is looked for one level down rather than giving up.
+            for name in ["ticket", "sessionId", "userId", "rememberMeTicket", "nameOnPlatform", "username", "expiration"]
+            where merged[name] == nil {
+                if let value = deepValue(name, in: object) { merged[name] = value }
             }
         }
         guard let ticket = merged["ticket"] as? String, !ticket.isEmpty,
@@ -153,6 +160,29 @@ actor UbisoftAPI {
                               ticket: ticket, sessionId: sessionId,
                               rememberMeTicket: merged["rememberMeTicket"] as? String,
                               expiration: (merged["expiration"] as? String).flatMap(parseDate))
+    }
+
+    /// The first value stored under `key` anywhere inside a parsed JSON value.
+    private static func deepValue(_ key: String, in value: Any) -> Any? {
+        if let dict = value as? [String: Any] {
+            if let hit = dict[key] { return hit }
+            for child in dict.values { if let hit = deepValue(key, in: child) { return hit } }
+        } else if let array = value as? [Any] {
+            for child in array { if let hit = deepValue(key, in: child) { return hit } }
+        }
+        return nil
+    }
+
+    /// Which of the capture's storage items carried anything, as short labels
+    /// for the log and the sign-in sheet's status line — never values.
+    static func captureParts(in text: String) -> [String] {
+        guard let data = text.data(using: .utf8),
+              let outer = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        let labels = ["loginData": "login", "rememberMe": "remember", "lastProfile": "profile"]
+        return labels.filter { key, _ in
+            if let string = outer[key] as? String { return !string.isEmpty && string != "null" }
+            return outer[key] is [String: Any]
+        }.map { $0.value }.sorted()
     }
 
     static func parseDate(_ text: String) -> Date? {

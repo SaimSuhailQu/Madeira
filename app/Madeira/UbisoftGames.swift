@@ -386,6 +386,7 @@ struct UbisoftSignInView: View {
     @State private var busy = false
     @State private var failure: String?
     @State private var reload = 0
+    @State private var status = "Sign in on Ubisoft's page — this sheet finishes by itself when you're done."
 
     var body: some View {
         NavigationStack {
@@ -396,14 +397,22 @@ struct UbisoftSignInView: View {
                         Button("Sign out", role: .destructive) { ubisoft.signOut(); Self.clearUbisoftWebsiteData() }
                     }
                 } else {
-                    UbisoftLoginWebView(reload: reload) { capture in submit(capture) }
-                        .ignoresSafeArea(edges: .bottom)
-                        .overlay {
-                            if busy {
-                                ProgressView("Signing in…").padding(20)
-                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    VStack(spacing: 0) {
+                        UbisoftLoginWebView(reload: reload, onStatus: { status = $0 }) { capture in submit(capture) }
+                            .ignoresSafeArea(edges: .bottom)
+                            .overlay {
+                                if busy {
+                                    ProgressView("Signing in…").padding(20)
+                                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                                }
                             }
-                        }
+                        Text(status)
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 16).padding(.vertical, 8)
+                            .background(.bar)
+                    }
                 }
             }
             .navigationTitle("Ubisoft Connect").navigationBarTitleDisplayMode(.inline)
@@ -481,12 +490,13 @@ struct UbisoftSignInView: View {
 /// Signing out removes Ubisoft's website data along with the ticket.
 struct UbisoftLoginWebView: UIViewRepresentable {
     var reload: Int
+    var onStatus: (String) -> Void = { _ in }
     var onCapture: (String) -> Void
 
     /// Desktop Safari (macOS) — desktop page variant, WebKit-consistent.
     static let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15"
 
-    func makeCoordinator() -> Coordinator { Coordinator(onCapture: onCapture) }
+    func makeCoordinator() -> Coordinator { Coordinator(onCapture: onCapture, onStatus: onStatus) }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -503,9 +513,12 @@ struct UbisoftLoginWebView: UIViewRepresentable {
 
     func updateUIView(_ view: WKWebView, context: Context) {
         context.coordinator.onCapture = onCapture
+        context.coordinator.onStatus = onStatus
         if context.coordinator.loadedReload != reload {
             context.coordinator.loadedReload = reload
             context.coordinator.delivered = false
+            context.coordinator.readyChecks = 0
+            context.coordinator.handedOff = false
             view.load(URLRequest(url: UbisoftAPI.loginURL))
         }
     }
@@ -516,11 +529,20 @@ struct UbisoftLoginWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var onCapture: (String) -> Void
+        var onStatus: (String) -> Void
         var loadedReload = 0
         var delivered = false
+        /// Polls that found the browser on a post-login page with no usable
+        /// session yet, and whether the relay-page handoff already ran.
+        var readyChecks = 0
+        var handedOff = false
+        private var stuckReported = false
         private var timer: Timer?
         private weak var view: WKWebView?
-        init(onCapture: @escaping (String) -> Void) { self.onCapture = onCapture }
+        init(onCapture: @escaping (String) -> Void, onStatus: @escaping (String) -> Void) {
+            self.onCapture = onCapture
+            self.onStatus = onStatus
+        }
 
         func startPolling(_ view: WKWebView) {
             self.view = view
@@ -541,12 +563,37 @@ struct UbisoftLoginWebView: UIViewRepresentable {
 
         private func check() {
             guard !delivered, let view, view.url?.host?.lowercased() == "connect.ubisoft.com" else { return }
+            if UbisoftAPI.isReadyPage(view.url) {
+                onStatus("Signed in at Ubisoft — reading your session…")
+                readyChecks += 1
+                if readyChecks >= 3, !handedOff {
+                    // The post-login page is Ubisoft's app shell; when it
+                    // stalls blank, its script context stalls with it and the
+                    // storage read below never answers. Move to the relay
+                    // page the GOG integration uses — a fresh, light document
+                    // on the same origin, where the same storage answers.
+                    // Counted outside the script callback on purpose: a
+                    // stalled page is exactly when the callback may not run.
+                    handedOff = true
+                    UbisoftLog.event("[ubisoft-signin] moving to the relay page to read the session")
+                    view.load(URLRequest(url: URL(string: "https://connect.ubisoft.com/change_domain/")!))
+                    return
+                }
+            }
             view.evaluateJavaScript(UbisoftAPI.captureScript) { [weak self] result, _ in
-                guard let self, !self.delivered, let text = result as? String, !text.isEmpty,
-                      UbisoftAPI.session(fromCapture: text) != nil else { return }
-                self.delivered = true
-                self.stopPolling()
-                self.onCapture(text)
+                guard let self, !self.delivered, let text = result as? String, !text.isEmpty else { return }
+                if UbisoftAPI.session(fromCapture: text) != nil {
+                    self.delivered = true
+                    self.stopPolling()
+                    self.onCapture(text)
+                    return
+                }
+                if UbisoftAPI.isReadyPage(view.url), self.readyChecks >= 6, !self.stuckReported {
+                    self.stuckReported = true
+                    let parts = UbisoftAPI.captureParts(in: text)
+                    UbisoftLog.event("[ubisoft-signin] session unreadable; storage parts: \(parts.joined(separator: "+"))")
+                    self.onStatus("Ubisoft finished signing in, but Madeira couldn't read the session from the page. Tap Reload and sign in once more.")
+                }
             }
         }
 

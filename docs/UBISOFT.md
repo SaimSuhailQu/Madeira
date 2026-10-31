@@ -39,7 +39,11 @@ bot. Desktop Safari claims the desktop page variant while staying in the
 WebKit family the view actually runs, and the persistent store lets the
 filter's own cookies survive between attempts so a passed check counts;
 signing out removes Ubisoft's website data with the ticket. When the login finishes, the page's local storage holds the session ticket and
-remember-me ticket, which Madeira reads. The password and any two-factor step
+remember-me ticket, which Madeira reads. If the post-login page stalls
+blank — its app shell can wedge its own script context — Madeira moves the
+view to Ubisoft's `change_domain` relay page, a light document on the same
+origin where the same storage answers; the GOG integration performs the
+same handoff. The sheet narrates which stage it is in under the page. The password and any two-factor step
 stay inside Ubisoft's page and are never seen or stored. Tickets are bound to
 the club app id the login used, and every ubi-services call sends it. The
 ticket lives in one Keychain item for this device only; refresh is a ticket
