@@ -29,10 +29,15 @@ Sign in under Settings > Ubisoft Connect, with the account's email and
 password. Madeira sends them to Ubisoft's session service in one HTTPS
 call — `POST /v3/profiles/sessions`, the login Ubisoft's own mobile app
 makes — and keeps only the ticket it buys. The password builds the
-request and is never stored or logged. If the club app id refuses a
-password login, the same credentials go in under the mobile app id and
-the session is exchanged for a club-bound one, because tickets are bound
-to the app id that issued them. An account with 2-Step Verification
+request and is never stored or logged. The login goes in under the
+main-auth (mobile) app id — the documented first hop for password
+logins — and the session is exchanged for a club-bound one, because
+tickets are bound to the app id that issued them. (The first direct
+build tried the club app id first; the club takes its logins through
+the web page, and each refused attempt counts against the account's
+rate limit.) When Ubisoft refuses a login, its own error message from
+the response body is what the sheet shows; only the numeric error code
+reaches the log. An account with 2-Step Verification
 answers the login with a two-factor ticket instead of a session; the
 sheet then asks for the 6-digit code and completes the same call
 (`Ubi_2fa_v1` + `ubi-2facode`). The ticket lives in one Keychain item
@@ -50,11 +55,10 @@ same login in the phone's real browser went through; dressed as desktop
 Safari (the presentation it keeps — desktop page variant, WebKit family,
 persistent website data store) the login completed, but the heavy
 post-login page stalled blank more than once, its wedged script context
-never answering the session read — Madeira then moves the view to
-Ubisoft's `change_domain` relay page, a light document on the same
-origin where the same storage answers, the handoff the GOG integration
-performs. In that flow the password stays inside Ubisoft's page and is
-never seen by Madeira at all.
+never answering the session read. A `change_domain` relay-page handoff
+(the GOG integration's trick) was tried on device on 2026-10-31 and
+stalled the same way; it was removed. In that flow the password stays
+inside Ubisoft's page and is never seen by Madeira at all.
 
 Ubisoft checks ownership when it serves the owned
 list: `POST /v1/profiles/me/uplay/graphql`, the club `AllGames` query, filtered

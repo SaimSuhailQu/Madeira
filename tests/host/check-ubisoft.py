@@ -86,12 +86,18 @@ require("websiteDataStore = .default()" in games,
         "sign-in web view keeps a persistent data store (the anti-bot check's cookies must survive)")
 require("runJavaScriptAlertPanelWithMessage" in games and "runJavaScriptConfirmPanelWithMessage" in games,
         "sign-in web view answers JavaScript dialogs")
-require("change_domain" in games and "handedOff" in games,
-        "sign-in capture falls back to the relay page when the post-login page stalls")
+require("handedOff" not in games and "view.load(URLRequest(url: URL(string: \"https://connect.ubisoft.com/change_domain" not in games,
+        "the relay-page handoff is gone (tried on device 2026-10-31, stalled the same way)")
+require("couldn't read the session" in games,
+        "sign-in capture narrates an unreadable session instead of sitting blank")
 require("deepValue" in api and "captureParts" in api,
         "session parsing searches nested payloads and reports storage parts by label only")
 require("signIn(email:" in api and "Ubi_2fa_v1" in api and "completeTwoFactor" in api,
         "direct sign-in (password login + 2FA completion) is implemented in the API layer")
+require("appId: Self.authAppId, basic: basic" in api and "login-password-alt" not in api,
+        "password login leads with the main-auth (mobile) app id and exchanges — no club-first attempt")
+require("errorCode" in api and "Ubisoft refused the sign-in:" in api,
+        "a refused login surfaces Ubisoft's own error message, with only the code logged")
 require("SecureField" in games and "submitCredentials" in games and "submitCode" in games,
         "sign-in sheet leads with the direct form and keeps the web page as fallback")
 require("never stored" in games, "the form states the password is never stored")

@@ -33,8 +33,9 @@ enum UbisoftAPIError: LocalizedError, Equatable {
     case signedOut
     case http(Int)
     case invalid(String)
-    /// The credentials (or a 2FA code) were refused by the session service.
-    case rejected(Int)
+    /// The credentials (or a 2FA code) were refused by the session service;
+    /// the text is Ubisoft's own error message when it sent one.
+    case rejected(Int, String?)
     /// The login needs the account's 2-Step Verification code next. The
     /// pending exchange is kept inside the API actor, not in this value.
     case twoFactor
@@ -44,7 +45,9 @@ enum UbisoftAPIError: LocalizedError, Equatable {
         case .signedOut: return "Sign in to Ubisoft Connect to continue."
         case .http(let status): return "Ubisoft's server answered with HTTP \(status). Try again later."
         case .invalid(let what): return "Ubisoft sent an unexpected answer (\(what))."
-        case .rejected: return "Ubisoft refused those sign-in details. Check them and try again."
+        case .rejected(_, let detail):
+            if let detail, !detail.isEmpty { return "Ubisoft refused the sign-in: \(detail)" }
+            return "Ubisoft refused those sign-in details. Check them and try again."
         case .twoFactor: return "Enter the 2-Step Verification code for this account."
         }
     }
@@ -55,7 +58,7 @@ enum UbisoftAPIError: LocalizedError, Equatable {
         case .signedOut: return "signed-out"
         case .http(let status): return "http-\(status)"
         case .invalid(let what): return "invalid-\(what)"
-        case .rejected(let status): return "rejected-\(status)"
+        case .rejected(let status, _): return "rejected-\(status)"
         case .twoFactor: return "two-factor"
         }
     }
@@ -264,14 +267,13 @@ actor UbisoftAPI {
     // MARK: Direct sign-in
 
     /// The app id Ubisoft's own mobile app presents for password logins —
-    /// the documented first hop for credential sign-in. Used only when the
-    /// club app id refuses a password login; that session is then exchanged
-    /// for a club-bound one before anything is stored.
+    /// the documented first hop for credential sign-in. Its session is
+    /// exchanged for a club-bound one before anything is stored.
     static let authAppId = "4391c956-8943-48eb-8859-07b0778f47b9"
 
-    /// A 2-Step Verification exchange in flight: the limited ticket and the
-    /// app id the password login used (the completion must use the same).
-    private var pendingTwoFactor: (ticket: String, clubDirect: Bool)?
+    /// A 2-Step Verification exchange in flight: the limited ticket from
+    /// the main-auth password login, still owed its code completion.
+    private var pendingTwoFactor: String?
 
     /// Signs in with the account's email and password, sent only to
     /// Ubisoft's session service over HTTPS — the login its mobile app
@@ -281,28 +283,27 @@ actor UbisoftAPI {
     /// `UbisoftAPIError.twoFactor` when the account asks for its code;
     /// then call `completeTwoFactor(code:)`.
     func signIn(email: String, password: String) async throws -> UbisoftSession {
+        // Password login goes in through the main-auth (mobile) app id —
+        // the documented first hop — and the ticket is exchanged for a
+        // club-bound one before anything is stored. (The previous build
+        // tried the club app id first; the club takes its logins through
+        // the web page, and every refused password attempt counts against
+        // the account's rate limit.)
         let basic = Data("\(email):\(password)".utf8).base64EncodedString()
-        do {
-            let json = try await passwordLogin(appId: Self.appId, basic: basic, method: "login-password")
-            return try await finishLogin(json, clubDirect: true, method: "login-password")
-        } catch UbisoftAPIError.rejected {
-            // The club app id takes its logins through the web page, not a
-            // password — go in through the mobile app id and exchange.
-            let json = try await passwordLogin(appId: Self.authAppId, basic: basic, method: "login-password-alt")
-            return try await finishLogin(json, clubDirect: false, method: "login-password-alt")
-        }
+        let json = try await passwordLogin(appId: Self.authAppId, basic: basic, method: "login-password")
+        return try await finishLogin(json, method: "login-password")
     }
 
     /// Completes a two-factor sign-in with the account's 6-digit code.
     func completeTwoFactor(code: String) async throws -> UbisoftSession {
         guard let pending = pendingTwoFactor else { throw UbisoftAPIError.invalid("2fa-state") }
-        var request = sessionsRequest(appId: pending.clubDirect ? Self.appId : Self.authAppId)
+        var request = sessionsRequest(appId: Self.authAppId)
         request.httpMethod = "POST"
-        request.setValue("Ubi_2fa_v1 t=\(pending.ticket)", forHTTPHeaderField: "Authorization")
+        request.setValue("Ubi_2fa_v1 t=\(pending)", forHTTPHeaderField: "Authorization")
         request.setValue(code, forHTTPHeaderField: "ubi-2facode")
         request.httpBody = Data("{\"rememberMe\": true}".utf8)
         let json = try await loginObject(request, method: "login-2fa")
-        return try await finishLogin(json, clubDirect: pending.clubDirect, method: "login-2fa")
+        return try await finishLogin(json, method: "login-2fa")
     }
 
     private func passwordLogin(appId: String, basic: String, method: String) async throws -> [String: Any] {
@@ -313,23 +314,18 @@ actor UbisoftAPI {
         return try await loginObject(request, method: method)
     }
 
-    /// A login answer: a full session (adopted, exchanged first when it was
-    /// issued under the mobile app id), or the two-factor ask — a 200 with
-    /// no ticket but a two-factor ticket is not a failed login.
-    private func finishLogin(_ json: [String: Any], clubDirect: Bool, method: String) async throws -> UbisoftSession {
+    /// A login answer: a full session (exchanged to a club-bound ticket
+    /// first), or the two-factor ask — a 200 with no ticket but a
+    /// two-factor ticket is not a failed login.
+    private func finishLogin(_ json: [String: Any], method: String) async throws -> UbisoftSession {
         if let ticket = json["ticket"] as? String, !ticket.isEmpty {
             pendingTwoFactor = nil
-            if clubDirect {
-                let session = try adoptJSON(json, method: method)
-                UbisoftLog.event("[ubisoft-signin] signed in (direct)")
-                return session
-            }
             let session = try await exchange(ticket: ticket, sessionId: json["sessionId"] as? String)
             UbisoftLog.event("[ubisoft-signin] signed in (direct)")
             return session
         }
         if let twoFactor = json["twoFactorAuthenticationTicket"] as? String, !twoFactor.isEmpty {
-            pendingTwoFactor = (ticket: twoFactor, clubDirect: clubDirect)
+            pendingTwoFactor = twoFactor
             throw UbisoftAPIError.twoFactor
         }
         throw UbisoftAPIError.invalid(method)
@@ -350,17 +346,30 @@ actor UbisoftAPI {
         var request = URLRequest(url: URL(string: Self.servicesHost + "/v3/profiles/sessions")!)
         request.setValue(appId, forHTTPHeaderField: "Ubi-AppId")
         request.setValue("uplay", forHTTPHeaderField: "Ubi-RequestedPlatformType")
+        request.setValue("en-US", forHTTPHeaderField: "Ubi-LocaleCode")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
     }
 
     /// The login calls' own send: a 401 or 403 here means the credentials
     /// (or the code) were refused — not the stored-session sign-out the
-    /// shared send() reports.
+    /// shared send() reports. Ubisoft's error body travels with the refusal
+    /// (its message and numeric code), so a refusal says WHY — wrong
+    /// password, app restriction, rate limit — instead of guessing. The
+    /// message is Ubisoft's own text about the attempt, never a credential
+    /// or a ticket; only the code reaches the log.
     private func loginObject(_ request: URLRequest, method: String) async throws -> [String: Any] {
         let (data, response) = try await http.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        if status == 401 || status == 403 { throw UbisoftAPIError.rejected(status) }
+        if status == 401 || status == 403 {
+            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            var detail = (body?["message"] as? String) ?? (body?["error"] as? String) ?? (body?["errorDescription"] as? String)
+            if detail?.isEmpty == true { detail = nil }
+            if let code = body?["errorCode"] as? Int {
+                UbisoftLog.event("[ubisoft-api] \(method) refused code=\(code)")
+            }
+            throw UbisoftAPIError.rejected(status, detail)
+        }
         if status >= 400 || status == 0 {
             UbisoftLog.event("[ubisoft-api] \(method) failed reason=http-\(status)")
             throw UbisoftAPIError.http(status)

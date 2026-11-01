@@ -608,7 +608,6 @@ struct UbisoftLoginWebView: UIViewRepresentable {
             context.coordinator.loadedReload = reload
             context.coordinator.delivered = false
             context.coordinator.readyChecks = 0
-            context.coordinator.handedOff = false
             view.load(URLRequest(url: UbisoftAPI.loginURL))
         }
     }
@@ -623,9 +622,8 @@ struct UbisoftLoginWebView: UIViewRepresentable {
         var loadedReload = 0
         var delivered = false
         /// Polls that found the browser on a post-login page with no usable
-        /// session yet, and whether the relay-page handoff already ran.
+        /// session yet.
         var readyChecks = 0
-        var handedOff = false
         private var stuckReported = false
         private var timer: Timer?
         private weak var view: WKWebView?
@@ -656,20 +654,11 @@ struct UbisoftLoginWebView: UIViewRepresentable {
             if UbisoftAPI.isReadyPage(view.url) {
                 onStatus("Signed in at Ubisoft — reading your session…")
                 readyChecks += 1
-                if readyChecks >= 3, !handedOff {
-                    // The post-login page is Ubisoft's app shell; when it
-                    // stalls blank, its script context stalls with it and the
-                    // storage read below never answers. Move to the relay
-                    // page the GOG integration uses — a fresh, light document
-                    // on the same origin, where the same storage answers.
-                    // Counted outside the script callback on purpose: a
-                    // stalled page is exactly when the callback may not run.
-                    handedOff = true
-                    UbisoftLog.event("[ubisoft-signin] moving to the relay page to read the session")
-                    view.load(URLRequest(url: URL(string: "https://connect.ubisoft.com/change_domain/")!))
-                    return
-                }
             }
+            // (A change_domain relay-page handoff lived here: tried on
+            // device 2026-10-31, it stalled the same way as the page it was
+            // meant to rescue, and was removed. The direct form is the
+            // reliable door; this page is a fallback only.)
             view.evaluateJavaScript(UbisoftAPI.captureScript) { [weak self] result, _ in
                 guard let self, !self.delivered, let text = result as? String, !text.isEmpty else { return }
                 if UbisoftAPI.session(fromCapture: text) != nil {
