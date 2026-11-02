@@ -6,6 +6,13 @@ import ImageIO
 import Combine
 import Metal
 
+/// A text that is built in code (a note, a picker title, a status or an error) in the
+/// device's language, from Localizable.xcstrings; English when the catalog lacks it.
+/// Texts written straight into Text("...")/Button("...") are looked up by SwiftUI already.
+func L(_ text: String) -> String {
+    Bundle.main.localizedString(forKey: text, value: text, table: "Localizable")
+}
+
 // ============================================================================
 // Library front end.
 //
@@ -190,9 +197,27 @@ struct LibraryEntry: Codable, Identifiable {
     var display: String?
     /// FPS limit: 1 = 60, 3 = 30, 4 = 40, 0 = display maximum, 2 = uncapped (madeira_set_vsync_locked).
     var fpsMode = 1
-    /// FEX's X87ReducedPrecision for this game. Export both states explicitly:
-    /// FEX defaults to reduced precision when no override is set.
+    /// FEX's X87ReducedPrecision for this game: true exports 1 (reduced, fast).
+    /// false leaves the engine's default unless `fullX87` asks for full precision:
+    /// the 32-bit (WOW64) module runs reduced by default (ml950: full precision
+    /// cost Fallout: New Vegas 20-50 % of its CPU and about half its frame rate),
+    /// the 64-bit one full. Saved entries all carry false, so "false" has to mean
+    /// the engine's default, not "full": exporting 0 for it (upstream #461) put
+    /// every 32-bit game on the slow path.
     var reducedX87 = false
+    /// Full 80-bit x87 for this game (exports 0), chosen on the Compatibility page;
+    /// nil = the engine's default. Ignored when reducedX87 is on.
+    var fullX87: Bool?
+
+    /// The Compatibility page's x87 choice over reducedX87 and fullX87.
+    enum X87Precision: String, CaseIterable { case automatic, reduced, full }
+    var x87Precision: X87Precision {
+        get { reducedX87 ? .reduced : (fullX87 == true ? .full : .automatic) }
+        set {
+            reducedX87 = newValue == .reduced
+            fullX87 = newValue == .full ? true : nil
+        }
+    }
     var liveLogs = false
     var performance = false
     var touchControls = false
@@ -211,6 +236,9 @@ struct LibraryEntry: Codable, Identifiable {
     var overlayFields: [String]?
     /// The Wine desktop (explorer and services in a virtual desktop).
     var desktop: Bool?
+    /// ml2021: Valve's client in Big Picture, inside the Wine desktop (the library's
+    /// Big Picture button; C:\big-picture.bat, written at every launch).
+    var bigPicture: Bool?
     /// Touch controls' opacity (0.15...1, nil = 0.7) and overall size (0.5...2,
     /// nil = 1) in this game's sessions.
     var controlOpacity: Double?
@@ -245,6 +273,9 @@ struct LibraryEntry: Codable, Identifiable {
     /// Keyboard-and-mouse mode: vertical speed of the right-stick mouse relative
     /// to horizontal (PadBindings.mouseVertical); nil = 1.
     var padMouseVertical: Double?
+    /// Gyro aim and turbo for player 1 (PadAssist.swift); nil = both off.
+    /// Optional, so older files decode.
+    var padAssist: PadAssistSettings?
     /// Processors reported to Windows code in this game's sessions
     /// (MADEIRA_CPU_COUNT, ntdll); nil = automatic.
     var cpuCount: Int?
@@ -277,10 +308,18 @@ struct LibraryEntry: Codable, Identifiable {
     /// `graphicsAPI` were read for, and whether Steam's launch configuration was
     /// cached (LibraryModel.refreshSteamMetadata); any change reads them again.
     var steamMetadataInstall: String?
+    /// An itch.io game (ItchLibrary.swift): its game id. `relativePath` is then its
+    /// program inside C:\itch.
+    var itchGameID: Int?
     /// An Epic Games game (EpicLibrary.swift): its app name. `relativePath` is then
     /// its program inside C:\Program Files\Epic Games, and each start adds Epic's
     /// sign-in arguments (EpicLibrary.launchArguments) for that launch only.
     var epicAppName: String?
+    /// An EA app game (EALibrary.swift): its offer id. `relativePath` is then its
+    /// program inside C:\Program Files\EA Games, and each start first gets the game's
+    /// licence, the EA app's environment and Madeira's stand-in for the EA app's
+    /// local service (EALibrary.prepareLaunch).
+    var eaOfferID: String?
     /// An Epic game with an official way to start without anti-cheat
     /// (epicAntiCheatOffProgram): nil or true starts that program.
     /// The anti-cheat cannot run in Wine on iOS, so on is the default.
@@ -457,7 +496,10 @@ struct LibraryEntry: Codable, Identifiable {
     /// With startServices the target is the services batch, which carries the
     /// arguments itself. The exe is launchWindowsPath: "The game"'s program for
     /// a Steam game started as its own program.
-    private var launchCommand: (exe: String, args: String) {
+    private var launchCommand: (exe: String, args: String) { launchCommand(parent: nil) }
+    /// ml2320: with `parent` (a program, never with a batch) the program starts as its child:
+    /// "<parent>" "<program>" args, in the Wine desktop or directly.
+    private func launchCommand(parent: String?) -> (exe: String, args: String) {
         func quoted(_ s: String) -> String { "\"\(s)\"" }
         var path = launchWindowsPath
         var extra = programArguments.trimmingCharacters(in: .whitespaces)
@@ -468,11 +510,36 @@ struct LibraryEntry: Codable, Identifiable {
             extra = "/i \"\(launchWindowsPath)\"" + (extra.isEmpty ? "" : " " + extra)
         }
         func withExtra(_ s: String) -> String { extra.isEmpty ? s : s + " " + extra }
+        let parent = batch ? nil : parent
         if runsInDesktop {
-            return ("explorer.exe", "/desktop=shell,\(resolution) " + withExtra(batch ? "cmd /c \(quoted(path))" : quoted(path)))
+            let program = parent.map { quoted($0) + " " + quoted(path) } ?? quoted(path)
+            return ("explorer.exe", "/desktop=shell,\(resolution) " + withExtra(batch ? "cmd /c \(quoted(path))" : program))
         }
         if batch { return ("C:\\windows\\system32\\cmd.exe", withExtra("/c \(quoted(path))")) }
+        if let parent { return (parent, withExtra(quoted(path))) }
         return (path, extra)   // upstream's direct launch, arguments verbatim
+    }
+    /// ml2320: an Epic game's x64 program starts as the child of a process with the Epic client's
+    /// name (build/epic-parent), as it does under the Epic client on Windows. A publisher's launcher
+    /// that did not find that process treated the Epic copy as not owned and offered it for sale.
+    /// nil for any other entry, a batch, a 32-bit program, a build without the program, or with
+    /// env.MADEIRA_EPIC_LAUNCHER_PARENT=0.
+    var epicParent: String? {
+        guard epicAppName != nil, !isBatch, servicesScript == nil,
+              MadeiraConfig.get("env.MADEIRA_EPIC_LAUNCHER_PARENT") != "0",
+              Bundle.main.url(forResource: "EpicGamesLauncher", withExtension: "exe", subdirectory: "arm64ec-windows") != nil,
+              let url = Self.hostURL(ofWindowsPath: launchWindowsPath), Self.peMachine(url) == 0x8664 else { return nil }
+        return "C:\\windows\\system32\\EpicGamesLauncher.exe"
+    }
+    /// The PE machine of an executable (0x14c: 32-bit x86, 0x8664: x64), nil when unreadable.
+    static func peMachine(_ url: URL) -> Int? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        guard let dos = try? h.read(upToCount: 64), dos.count == 64, dos[0] == 0x4d, dos[1] == 0x5a else { return nil }
+        let offset = (0..<4).reduce(UInt64(0)) { $0 | (UInt64(dos[60 + $1]) << ($1 * 8)) }
+        guard offset >= 64, offset < 16 * 1024 * 1024, (try? h.seek(toOffset: offset)) != nil,
+              let pe = try? h.read(upToCount: 6), pe.count == 6, Array(pe.prefix(4)) == [0x50, 0x45, 0, 0] else { return nil }
+        return Int(pe[4]) | Int(pe[5]) << 8
     }
     /// The details page's "command that runs" line: the program's file name and
     /// its arguments, as upstream shows a direct start; ml1163: what starts it
@@ -512,6 +579,158 @@ struct LibraryEntry: Codable, Identifiable {
         var entry = LibraryEntry(title: "Desktop", relativePath: "windows/system32/explorer.exe", bits: 64)
         entry.id = desktopID; entry.desktop = true; entry.graphicsAPI = "Wine desktop"
         return entry
+    }
+
+    // MARK: ml2021 Big Picture
+
+    static let bigPictureID = UUID(uuidString: "5A0B2C44-9C1E-4D0F-8F2A-7B3E6D1C9A10")!
+    /// Valve's client in Big Picture (its gamepad UI) inside the Wine desktop, as a
+    /// desktop-mode batch: C:\big-picture.bat starts services.exe and then steam.exe
+    /// -bigpicture with the Chromium switches the Steam test launch proved
+    /// (ContentView.prepareSteamLaunch). Its recommended list (GameRecommendations
+    /// .steamBigPicture) carries the launcher-chain memory lines a 64-bit Chromium
+    /// host needs and the swap tier with the donor pool.
+    static var bigPictureEntry: LibraryEntry {
+        var entry = LibraryEntry(title: "Big Picture", relativePath: "big-picture.bat", bits: 64)
+        entry.id = bigPictureID; entry.bigPicture = true; entry.graphicsAPI = "Steam"; entry.launchMode = "desktop"
+        return entry
+    }
+    /// Madeira Dock's Steam folder inside the prefix (Windows path, Unix path), when its
+    /// steam.exe is there. Its component set is PINNED (SteamRuntime: steamclient64.dll must be
+    /// the build the Dock host supports), so the client UI must never run from it: steam.exe
+    /// would complete the install from Valve's CDN and replace the pinned build.
+    static var dockSteamFolder: (windows: String, unix: String)? {
+        let fm = FileManager.default
+        guard let documents = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let prefix = documents.appendingPathComponent("wine").path
+        let candidates = [
+            ("C:\\Program Files (x86)\\Steam", "\(prefix)/drive_c/Program Files (x86)/Steam"),
+            ("C:\\Program Files\\Steam", "\(prefix)/drive_c/Program Files/Steam"),
+        ]
+        return candidates.first { fm.fileExists(atPath: "\($0.1)/steam.exe") }
+    }
+    /// Big Picture's own Steam folder: Valve's client completes itself there on the first
+    /// run (steam.exe is Valve's bootstrapper: it fetches the client's packages, the web
+    /// helper included, from Valve's CDN into its own folder), leaving the Dock's pinned
+    /// install alone.
+    static var bigPictureFolder: (windows: String, unix: String)? {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let prefix = documents.appendingPathComponent("wine").path
+        return ("C:\\Program Files\\Steam Big Picture", "\(prefix)/drive_c/Program Files/Steam Big Picture")
+    }
+    /// Big Picture is unfinished: the button beside Desktop and a Big Picture card in the library
+    /// exist only in a build compiled with the Swift condition MADEIRA_BIG_PICTURE_UI (for example
+    /// xcodebuild SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) MADEIRA_BIG_PICTURE_UI').
+    /// No IPA build sets it, so release IPAs have neither; the launch code is compiled either way.
+#if MADEIRA_BIG_PICTURE_UI
+    static let bigPictureShown = true
+#else
+    static let bigPictureShown = false
+#endif
+    /// Whether the library lists this entry: a Big Picture entry only while Big Picture is shown.
+    var listedInLibrary: Bool { bigPicture != true || Self.bigPictureShown }
+    /// The button is offered when Big Picture's folder has a client, or the Dock's steam.exe
+    /// can seed one.
+    static var steamClientInstalled: Bool {
+        let fm = FileManager.default
+        if let bp = bigPictureFolder, fm.fileExists(atPath: "\(bp.unix)/steam.exe") { return true }
+        return dockSteamFolder != nil
+    }
+    /// Writes C:\big-picture.bat for this launch, seeding Big Picture's folder with the
+    /// Dock's steam.exe when it has none yet. False, having logged why, when there is no client.
+    @discardableResult
+    static func writeBigPictureBatch() -> Bool {
+        let fm = FileManager.default
+        guard let folder = bigPictureFolder,
+              let documents = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
+        if !fm.fileExists(atPath: "\(folder.unix)/steam.exe") {
+            guard let dock = dockSteamFolder else {
+                LogStore.shared.log("[big-picture] no Steam client to start from: prepare Madeira Dock's Steam components first", level: .error)
+                return false
+            }
+            do {
+                try fm.createDirectory(atPath: folder.unix, withIntermediateDirectories: true)
+                try fm.copyItem(atPath: "\(dock.unix)/steam.exe", toPath: "\(folder.unix)/steam.exe")
+                LogStore.shared.log("[big-picture] seeded \(folder.windows) with the Dock's steam.exe; Valve's client completes itself there on this first run (a download from Valve's CDN)")
+            } catch {
+                LogStore.shared.log("[big-picture] could not seed \(folder.windows): \(error.localizedDescription)", level: .error)
+                return false
+            }
+        }
+        // ml2210: once the 32-bit client and its web helper (bin/cef/cef.win7) are in place,
+        // the bootstrapper neither updates itself nor the client, so a later run cannot move
+        // it to the 64-bit client, whose CEF pools do not fit the address space.
+        // env.MADEIRA_BIG_PICTURE_PIN = 0 lets it update as before.
+        let pinned = MadeiraConfig.flag("MADEIRA_BIG_PICTURE_PIN", fallback: true)
+            && fm.fileExists(atPath: "\(folder.unix)/bin/cef/cef.win7/steamwebhelper.exe")
+        if pinned { LogStore.shared.log("[big-picture] ml2210 the installed 32-bit client is kept: no bootstrap update this run") }
+        // ml2230: env.MADEIRA_BIG_PICTURE_GPU = 1 lets the web helper draw with the GPU (Chromium's
+        // ANGLE on the 32-bit D3D11); off by default, software drawing as before.
+        let gpu = MadeiraConfig.flag("MADEIRA_BIG_PICTURE_GPU", fallback: false)
+        if gpu { LogStore.shared.log("[big-picture] ml2230 the web helper may use the GPU (env.MADEIRA_BIG_PICTURE_GPU = 1)") }
+        listMadeiraLibraries(in: folder)
+        let bat = [
+            "@echo off",
+            "rem Generated by Madeira (ml2021) for Big Picture; rewritten at every launch.",
+            "start \"\" \"C:\\windows\\system32\\services.exe\"",
+            "cd /d \"\(folder.windows)\"",
+            "\"\(folder.windows)\\steam.exe\" -bigpicture -no-cef-sandbox" + (gpu ? "" : " -cef-disable-gpu") + " -console -nocrashmonitor"
+                + (pinned ? " -nobootstrapperupdate -skipinitialbootstrap" : "")
+                + " -cef-disable-features=SegmentationPlatform,OptimizationTargetPrediction,OptimizationHints",
+        ].joined(separator: "\r\n") + "\r\n"
+        let path = documents.appendingPathComponent("wine/drive_c/big-picture.bat").path
+        do {
+            try bat.write(toFile: path, atomically: true, encoding: .utf8)
+        } catch {
+            LogStore.shared.log("[big-picture] could not write big-picture.bat: \(error.localizedDescription)", level: .error)
+            return false
+        }
+        LogStore.shared.log("[big-picture] steam.exe -bigpicture from \(folder.windows) in the Wine desktop")
+        return true
+    }
+
+    /// ml2230: Big Picture's client lists the games Madeira installed. Its libraryfolders.vdf
+    /// (config/, the one Valve's client reads, and its steamapps/ copy) gets Madeira's Steam
+    /// library (the Dock client's folder, where downloads go) and the libraries on connected
+    /// drives, added beside the client's own entries, never replacing one. The records there
+    /// are the client's own format (AppManifestWriter). env.MADEIRA_BIG_PICTURE_LIBRARIES = 0
+    /// leaves the files alone.
+    private static func listMadeiraLibraries(in folder: (windows: String, unix: String)) {
+        guard MadeiraConfig.flag("MADEIRA_BIG_PICTURE_LIBRARIES", fallback: true) else { return }   // 0: Big Picture's client lists only its own library
+        let fm = FileManager.default
+        let own = "Program Files/Steam Big Picture"
+        // ml2240: every library Madeira's Steam list reads (MadeiraDock.steamLibraries), not
+        // only the client's own folder and the external drives: the other C: libraries its
+        // libraryfolders.vdf names were left out. MADEIRA_BIG_PICTURE_DOCK_LIBRARIES=0 restores.
+        let found = MadeiraConfig.flag("MADEIRA_BIG_PICTURE_DOCK_LIBRARIES", fallback: true)
+            ? MadeiraDock.steamLibraries(drive: MadeiraDock.drive)
+            : [SteamRuntimeFiles.relativeRoot + "/steamapps"] + ExternalDrives.steamLibraries
+        var libraries = [own]
+        for library in found.prefix(32) where library.hasSuffix("/steamapps") {
+            let root = String(library.dropLast("/steamapps".count))
+            guard !libraries.contains(where: { $0.caseInsensitiveCompare(root) == .orderedSame }) else { continue }
+            libraries.append(root)
+            let manifests = ((try? fm.contentsOfDirectory(atPath: MadeiraDock.drive.appendingPathComponent(library).path)) ?? [])
+                .filter { $0.hasPrefix("appmanifest_") && $0.hasSuffix(".acf") }
+            LogStore.shared.log("[big-picture] ml2240 library C:\\\(root.replacingOccurrences(of: "/", with: "\\")): \(manifests.count) install record(s)")
+        }
+        var added = 0
+        for sub in ["config", "steamapps"] {
+            let vdf = URL(fileURLWithPath: "\(folder.unix)/\(sub)/libraryfolders.vdf")
+            do {
+                let existing: Data?
+                do { existing = try Data(contentsOf: vdf) }
+                catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { existing = nil }
+                let data = try ExternalSteamLibraries.add(paths: libraries, to: existing)
+                guard data != existing else { continue }
+                try fm.createDirectory(at: vdf.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: vdf, options: .atomic)
+                added += 1
+            } catch {
+                LogStore.shared.log("[big-picture] \(sub)/libraryfolders.vdf was kept: \(error.localizedDescription)")
+            }
+        }
+        LogStore.shared.log("[big-picture] ml2230 Madeira's Steam libraries listed for Big Picture: \(libraries.count - 1) (\(added) file(s) updated)")
     }
 
     var windowsPath: String { "C:\\" + relativePath.replacingOccurrences(of: "/", with: "\\") }
@@ -569,7 +788,14 @@ struct LibraryEntry: Codable, Identifiable {
         configureLaunch()
         // MADEIRA_ARGS now holds an Epic game's sign-in code; nothing else needs it.
         Self.setTransientArguments(nil, for: id)
-        setenv("FEX_X87REDUCEDPRECISION", reducedX87 ? "1" : "0", 1)
+        // x87: exported only when chosen. Automatic leaves FEX's own default (reduced
+        // for 32-bit games, full for 64-bit) and any madeira.cfg line, and clears a
+        // previous game's choice.
+        switch x87Precision {
+        case .reduced: setenv("FEX_X87REDUCEDPRECISION", "1", 1)
+        case .full: setenv("FEX_X87REDUCEDPRECISION", "0", 1)
+        case .automatic: unsetenv("FEX_X87REDUCEDPRECISION")   // madeira.cfg's line, if any, comes later (WineProcessBridge per_launch)
+        }
         // Exported only when chosen: unset keeps the engine's own default (and any
         // madeira.cfg setting), as before these choices existed.
         // Unset otherwise, so a previous game's choice (a launch that died before the
@@ -634,7 +860,7 @@ struct LibraryEntry: Codable, Identifiable {
     func configureLaunch() {
         // "The game"'s identity and the launch's working folder, for this launch only
         // (the bridge reads and clears them); every other launch starts without them.
-        unsetenv("MADEIRA_STEAM_APPID"); unsetenv("MADEIRA_STEAM_APPPATH"); unsetenv("MADEIRA_WORKDIR")
+        unsetenv("MADEIRA_STEAM_APPID"); unsetenv("MADEIRA_STEAM_APPPATH"); unsetenv("MADEIRA_WORKDIR"); unsetenv("MADEIRA_NO_STEAM_IDENTITY")
         if steamAppID != nil {
             // A Steam game through Madeira Dock: Dock has set what starts (ContentView.startDock);
             // the virtual monitor follows this entry's Resolution, as below. "The game" starts
@@ -644,7 +870,10 @@ struct LibraryEntry: Codable, Identifiable {
                 return
             }
         }
-        let command = desktop == true ? (exe: "explorer.exe", args: launchArguments) : launchCommand
+        if bigPicture == true { Self.writeBigPictureBatch() }   // ml2021: the batch the desktop-mode launch runs
+        let parent = desktop == true ? nil : epicParent
+        let command = desktop == true ? (exe: "explorer.exe", args: launchArguments) : launchCommand(parent: parent)
+        if parent != nil { fputs("[epic-parent] ml2320 the game starts as EpicGamesLauncher.exe's child\n", stderr) }
         setenv("MADEIRA_EXE", command.exe, 1)
         setenv("MADEIRA_ARGS", LaunchArgumentText.plain(command.args), 1)
         // Export both choices: unsetting Directly lets a global env.MADEIRA_DESKTOP=1
@@ -655,6 +884,12 @@ struct LibraryEntry: Codable, Identifiable {
             // folder) instead of the bridge's fixed one.
             setenv("MADEIRA_STEAM_APPID", String(steamAppID), 1)
             setenv("MADEIRA_STEAM_APPPATH", windowsPath, 1)
+        }
+        // ml2310: a game from another store is not a Steam game. With the bridge's fixed Steam
+        // identity its launcher took its Steam path and failed; env.MADEIRA_STORE_STEAM_IDENTITY=1
+        // publishes it as before.
+        if epicAppName != nil, MadeiraConfig.get("env.MADEIRA_STORE_STEAM_IDENTITY") != "1" {
+            setenv("MADEIRA_NO_STEAM_IDENTITY", "1", 1)
         }
         // ml1163: a game starts in launchDirectory (a chosen folder, Steam's for "The game",
         // else the program's own). It is exported when the bridge's default, the folder of
@@ -783,6 +1018,10 @@ final class LibraryModel: ObservableObject {
     /// The session's right-stick mouse vertical speed (LibraryEntry.padMouseVertical).
     @Published var padMouseVertical: Double = 1 {
         didSet { if oldValue != padMouseVertical { applyControllerMode() } }
+    }
+    /// The session's gyro aim and turbo (LibraryEntry.padAssist); the pad sampler takes a change at once.
+    @Published var padAssist: PadAssistSettings? {
+        didSet { if oldValue != padAssist { GamepadInput.shared.setPadAssist(current == nil ? nil : padAssist) } }
     }
     /// The session's touch-control opacity (the entry's Control opacity).
     @Published var opacity = 0.7
@@ -930,7 +1169,9 @@ final class LibraryModel: ObservableObject {
         // one (refreshSteamMetadata) updates that entry.
         if let i = next.firstIndex(where: { $0.id == entry.id }) ??
             next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID }) ??
+            next.firstIndex(where: { entry.itchGameID != nil && $0.itchGameID == entry.itchGameID }) ??
             next.firstIndex(where: { entry.epicAppName != nil && $0.epicAppName == entry.epicAppName }) ??
+            next.firstIndex(where: { entry.eaOfferID != nil && $0.eaOfferID == entry.eaOfferID }) ??
             next.firstIndex(where: { entry.ubisoftSpaceId != nil && $0.ubisoftSpaceId == entry.ubisoftSpaceId }) ??
             next.firstIndex(where: { entry.ubisoftLaunchId != nil && $0.ubisoftLaunchId == entry.ubisoftLaunchId }) {
             // A details sheet may predate an asynchronous metadata refresh.
@@ -975,6 +1216,89 @@ final class LibraryModel: ObservableObject {
         steamMetadataWaiting[appID] = nil
         guard entries.contains(where: { $0.steamAppID == appID }) else { return }
         persist(entries.filter { $0.steamAppID != appID })
+    }
+    /// A store's cover art as a JPEG of at most 1200 pixels, or nil.
+    static func storeCover(_ url: URL) async -> Data? {
+        guard url.scheme == "https", let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200, data.count < 20_000_000,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                                             kCGImageSourceThumbnailMaxPixelSize: 1200,
+                                                                             kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
+        else { return nil }
+        return UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.85)
+    }
+    /// An itch.io download finished (ItchLibrary): the game gets its library entry, or an
+    /// existing one follows the new program and keeps its title, artwork and settings.
+    /// A new entry gets itch.io's cover art as its cover image. While its program is an
+    /// installer (ItchSetup), the entry starts in the Wine desktop with Windows services
+    /// first; once the installer has installed the game, it starts directly again.
+    @MainActor
+    func upsertItch(_ game: ItchInstalledGame, cover: URL?, setupFinished: Bool = false) async {
+        guard !readOnly else { return }
+        var entry = entries.first { $0.itchGameID == game.gameID } ?? LibraryEntry(title: game.title, relativePath: game.programPath, bits: 0)
+        entry.itchGameID = game.gameID
+        entry.relativePath = game.programPath
+        if game.setup != nil {
+            entry.launchMode = "desktop"; entry.startServices = true
+        } else if setupFinished {
+            entry.launchMode = nil; entry.startServices = nil
+        }
+        entry.folderBytes = game.installBytes
+        let program = Self.drive.appendingPathComponent(game.programPath)
+        if let inspected = await Task.detached(priority: .utility, operation: { try? LibraryModel.inspect(program) }).value {
+            entry.bits = inspected.bits
+            entry.graphicsAPI = inspected.graphicsAPI ?? entry.graphicsAPI
+        }
+        if entry.coverFile == nil, let cover, let jpeg = await Self.storeCover(cover) {
+            let dir = Self.documents.appendingPathComponent("madeira-art", isDirectory: true)
+            let name = entry.id.uuidString + ".jpg"
+            if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
+               (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                entry.coverFile = name
+            }
+        }
+        entry.metadataChecked = nil
+        save(entry)
+    }
+    /// An itch.io game was uninstalled: its entry goes with its files.
+    func removeItch(gameID: Int) {
+        guard entries.contains(where: { $0.itchGameID == gameID }) else { return }
+        persist(entries.filter { $0.itchGameID != gameID })
+    }
+    /// An EA download finished (EALibrary): the game gets its library entry, or an
+    /// existing one follows the new build's program and keeps its title, artwork and
+    /// settings. Arguments follow the build's manifest unless the player changed them.
+    /// A new entry gets EA's cover art as its cover image.
+    @MainActor
+    func upsertEA(_ game: EAInstalledGame, previous: EAInstalledGame?, cover: URL?) async {
+        guard !readOnly else { return }
+        let existing = entries.first { $0.eaOfferID == game.offerID }
+        var entry = existing ?? LibraryEntry(title: game.title, relativePath: game.programPath, bits: 0)
+        entry.eaOfferID = game.offerID
+        entry.relativePath = game.programPath
+        entry.folderBytes = game.installBytes
+        if existing == nil || entry.arguments == (previous?.arguments ?? "") { entry.arguments = game.arguments }
+        let program = Self.drive.appendingPathComponent(game.programPath)
+        if let inspected = await Task.detached(priority: .utility, operation: { try? LibraryModel.inspect(program) }).value {
+            entry.bits = inspected.bits
+            entry.graphicsAPI = inspected.graphicsAPI ?? entry.graphicsAPI
+        }
+        if entry.coverFile == nil, let cover, let jpeg = await Self.storeCover(cover) {
+            let dir = Self.documents.appendingPathComponent("madeira-art", isDirectory: true)
+            let name = entry.id.uuidString + ".jpg"
+            if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
+               (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                entry.coverFile = name
+            }
+        }
+        entry.metadataChecked = nil
+        save(entry)
+    }
+    /// An EA game was uninstalled: its entry goes with its files.
+    func removeEA(offerID: String) {
+        guard entries.contains(where: { $0.eaOfferID == offerID }) else { return }
+        persist(entries.filter { $0.eaOfferID != offerID })
     }
     /// An Epic download finished (EpicLibrary): the game gets its library entry, or an
     /// existing one follows the new build's program and keeps its title, artwork and
@@ -1204,8 +1528,11 @@ final class LibraryModel: ObservableObject {
     static func relativeToDrive(_ url: URL) -> String? {
         let path = url.resolvingSymlinksInPath().standardizedFileURL.path
         if path.hasPrefix(drive.path + "/") { return String(path.dropFirst(drive.path.count + 1)) }
-        for root in ExternalDrives.shared.roots where path.hasPrefix(root.path + "/") {
-            return "External/" + root.name + "/" + path.dropFirst(root.path.count + 1)
+        for root in ExternalDrives.shared.roots {
+            if path == root.path { return "External/" + root.name }
+            if path.hasPrefix(root.path + "/") {
+                return "External/" + root.name + "/" + path.dropFirst(root.path.count + 1)
+            }
         }
         return nil
     }
@@ -1213,13 +1540,13 @@ final class LibraryModel: ObservableObject {
         let url = drive.appendingPathComponent(relative).resolvingSymlinksInPath().standardizedFileURL
         guard relativeToDrive(url) != nil, (programExtensions.union(installerExtensions)).contains(url.pathExtension.lowercased()),
               FileManager.default.fileExists(atPath: url.path) else {
-            throw LibraryError.message("Choose an executable or installer (.exe, .bat, .cmd or .msi) inside drive_c.")
+            throw LibraryError.message(L("Choose an executable or installer (.exe, .bat, .cmd or .msi) inside drive_c."))
         }
         return url
     }
     static func inspect(_ url: URL) throws -> LibraryEntry {
         guard let relative = relativeToDrive(url) else {
-            throw LibraryError.message("The executable must be inside drive_c or an external drive.")
+            throw LibraryError.message(L("The executable must be inside drive_c or an external drive."))
         }
         if ["bat", "cmd"].contains(url.pathExtension.lowercased()) {
             // ml1163: a batch file has no PE header. Like every entry it starts
@@ -1235,14 +1562,14 @@ final class LibraryModel: ObservableObject {
         }
         let h = try FileHandle(forReadingFrom: url); defer { try? h.close() }
         let dos = try h.read(upToCount: 64) ?? Data()
-        guard dos.count == 64, dos[0] == 0x4d, dos[1] == 0x5a else { throw LibraryError.message("This is not a Windows executable.") }
+        guard dos.count == 64, dos[0] == 0x4d, dos[1] == 0x5a else { throw LibraryError.message(L("This is not a Windows executable.")) }
         let offset = (0..<4).reduce(UInt64(0)) { $0 | (UInt64(dos[60 + $1]) << ($1 * 8)) }
-        guard offset >= 64, offset < 16 * 1024 * 1024 else { throw LibraryError.message("Invalid executable header.") }
+        guard offset >= 64, offset < 16 * 1024 * 1024 else { throw LibraryError.message(L("Invalid executable header.")) }
         try h.seek(toOffset: offset)
         let pe = try h.read(upToCount: 6) ?? Data()
-        guard pe.count == 6, Array(pe.prefix(4)) == [0x50, 0x45, 0, 0] else { throw LibraryError.message("Missing PE header.") }
+        guard pe.count == 6, Array(pe.prefix(4)) == [0x50, 0x45, 0, 0] else { throw LibraryError.message(L("Missing PE header.")) }
         let machine = Int(pe[4]) | Int(pe[5]) << 8
-        guard machine == 0x14c || machine == 0x8664 else { throw LibraryError.message("Only x86 and x64 executables are supported.") }
+        guard machine == 0x14c || machine == 0x8664 else { throw LibraryError.message(L("Only x86 and x64 executables are supported.")) }
         let name = url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "_", with: " ")
         var entry = LibraryEntry(title: name, relativePath: relative, bits: machine == 0x14c ? 32 : 64)
         entry.graphicsAPI = graphicsImports(url)
@@ -1328,7 +1655,7 @@ final class LibraryModel: ObservableObject {
     /// are still there and init_registry aborts on "\Registry". Madeira asks for
     /// a restart instead. MADEIRA_ONE_SESSION_PER_RUN=0 lets the launch go ahead.
     static var sessionsThisRun = 0
-    static let restartMessage = "Restart Madeira to start another game: swipe Madeira away in the app switcher, then open it again."
+    static let restartMessage = L("Restart Madeira to start another game: swipe Madeira away in the app switcher, then open it again.")
     @Published var restartNotice: String? { didSet { if restartNotice != nil { preparing = nil } } }
     /// CS_DEBUGGED is set but no debugger is attached (JIT was enabled outside
     /// Madeira): the text of the alert that offers Madeira's own Enable JIT.
@@ -1419,6 +1746,8 @@ final class LibraryModel: ObservableObject {
         padMouseVertical = GamepadInput.keyboardMouseAvailable ? (entry.padMouseVertical ?? 1) : 1
         controllerMode = GamepadInput.keyboardMouseAvailable ? entry.controllerMode : nil
         applyControllerMode()
+        padAssist = entry.padAssist
+        GamepadInput.shared.setPadAssist(padAssist)
         MetalHostView.shared.isHidden = false
         ProMotionIntent.apply(mode: entry.effectiveFPSMode)
         ThermalPacing.shared.begin()
@@ -1462,19 +1791,19 @@ final class LibraryModel: ObservableObject {
         if current != nil, !forceCloseOffered, let asked = quitRequestedAt,
            Date().timeIntervalSince(asked) > Self.forceCloseAfter {
             forceCloseOffered = true
-            sessionMessage = "The game did not close. Open the menu to force-close Madeira."
+            sessionMessage = L("The game did not close. Open the menu to force-close Madeira.")
             fputs("[frontend] still running \(Int(Self.forceCloseAfter)) s after the close request; force close offered\n", stderr)
         }
         if current != nil, dockGameEndedAt == nil, !launching, DockStartScreen.shared.active,
            MainActor.assumeIsolated({ MadeiraDock.pollReport().result }) == 0 {
             dockGameEndedAt = Date()
-            sessionMessage = "The game has closed. Returning to the library…"
+            sessionMessage = L("The game has closed. Returning to the library…")
             winios_close_desktop()
             fputs("[frontend] the Dock game ended and Steam shut down; closing the desktop\n", stderr)
         }
         if current != nil, !dockGameEnded, let ended = dockGameEndedAt, Date().timeIntervalSince(ended) > Self.forceCloseAfter {
             dockGameEnded = true; forceCloseOffered = true; menu = true
-            sessionMessage = "The game has closed."
+            sessionMessage = L("The game has closed.")
             fputs("[frontend] the desktop is still up \(Int(Self.forceCloseAfter)) s after the Dock game ended; Close Madeira offered\n", stderr)
         }
         // The first frame gives Aspect and Fill height the drawable's shape.
@@ -1490,7 +1819,7 @@ final class LibraryModel: ObservableObject {
         guard current != nil && !sawProcess else { return }
         finish()
         if offerJIT, let reason { jitNotice = reason }
-        else { error = reason ?? "The session could not start. Check the diagnostic log and JIT status." }
+        else { error = reason ?? L("The session could not start. Check the diagnostic log and JIT status.") }
     }
     /// Both flags change in one transaction without animation: the animated
     /// removal of a scrolling view with live content could leave the starting
@@ -1553,7 +1882,7 @@ final class LibraryModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             winios_post_key(0x73, 0); winios_post_key(0x12, 0)
         }
-        sessionMessage = "Close requested. Confirm any in-game exit dialog."
+        sessionMessage = L("Close requested. Confirm any in-game exit dialog.")
         menu = false
         fputs("[frontend] graceful close requested\n", stderr)
     }
@@ -1570,6 +1899,7 @@ final class LibraryModel: ObservableObject {
             if GamepadInput.keyboardMouseAvailable { entry.controllerMode = controllerMode }
             if GamepadInput.keyboardMouseAvailable { entry.controllerBinds = controllerBinds.isEmpty ? nil : controllerBinds }
             if GamepadInput.keyboardMouseAvailable { entry.padMouseVertical = padMouseVertical == 1 ? nil : padMouseVertical }
+            entry.padAssist = padAssist
             // The in-game Aspect & scaling choice sticks to the game. MADEIRA_SESSION_TOOLS=0
             // hides that picker and leaves the stored choice alone.
             if MadeiraConfig.flag("MADEIRA_SESSION_TOOLS") { entry.display = displayMode.rawValue }
@@ -1584,6 +1914,8 @@ final class LibraryModel: ObservableObject {
         controllerMode = nil
         controllerBinds = [:]
         padMouseVertical = 1
+        padAssist = nil
+        GamepadInput.shared.setPadAssist(nil)
         let controls = TouchControlsModel.shared
         controls.editing = false; controls.selected = nil
         controls.controls = savedControls; controls.visible = savedVisible; controls.sizeScale = savedSize
@@ -1753,7 +2085,7 @@ struct LibraryTitleText: View {
                 .foregroundStyle(jit ? Color.accentColor : Color.primary)
                 .contentTransition(.symbolEffect(.replace))
                 .alignmentGuide(.firstTextBaseline) { d in d.height / 2 + LibraryHeaderAlignment.titleFont().capHeight / 2 }
-                .accessibilityLabel(jit ? "JIT enabled" : "JIT not enabled")
+                .accessibilityLabel(jit ? L("JIT enabled") : L("JIT not enabled"))
         }
         .font(.largeTitle.bold())
         .fixedSize()
@@ -2526,12 +2858,11 @@ struct LibraryBadges: View {
     @ViewBuilder private var size: some View {
         if let text = Self.sizeText(entry) { badge(text) }
     }
-    /// The format pills' texts, in order (also the zoomable grid's measured labels).
+    /// The format pills' texts, in order (also the zoomable grid's measured labels). No bitness or graphics API pills: both were
+    /// read from the program before it ran and were often wrong.
     static func formatTexts(_ entry: LibraryEntry, note: String?) -> [String] {
         var texts: [String] = []
-        if entry.bits == 32 || entry.bits == 64 { texts.append("\(entry.bits)-bit") }
         if entry.isBatch { texts.append("Batch") }   // ml1163
-        if let api = LibraryRendererBadge.compact(entry.graphicsAPI) { texts.append(LibraryRendererBadge.display(api)) }
         if let note { texts.append(note) }
         return texts
     }
@@ -2553,12 +2884,19 @@ struct LibraryStatus: View {
     @State private var memory = false
     let ticks = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     var body: some View {
-        HStack(spacing: 8) {
-            badge("JIT", jit)
-            badge("Memory+", memory)
-            if jit && memory {
-                Text("Ready to play").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-                    .padding(.leading, 4)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                badge("JIT", jit)
+                badge("Memory+", memory)
+                if jit && memory {
+                    Text("Ready to play").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+                }
+            }
+            if !memory {
+                Text("Memory+ requires the Increased Memory Limit entitlement in this signed copy of Madeira. Enabling JIT does not grant it. Check that your signing tool enables this capability for Madeira, then sign and install the updated app without deleting your existing installation.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .onAppear { update() }.onReceive(ticks) { _ in update() }
@@ -2708,9 +3046,9 @@ enum LibraryGrouping {
             let today = calendar.startOfDay(for: now)
             let week = calendar.date(byAdding: .day, value: -6, to: today) ?? today
             let month = calendar.date(byAdding: .day, value: -29, to: today) ?? today
-            groups = [Group(id: "today", title: "Today", games: []), Group(id: "week", title: "Past 7 days", games: []),
-                      Group(id: "month", title: "Past 30 days", games: []), Group(id: "earlier", title: "Earlier", games: []),
-                      Group(id: "never", title: "Never played", games: [])]
+            groups = [Group(id: "today", title: L("Today"), games: []), Group(id: "week", title: L("Past 7 days"), games: []),
+                      Group(id: "month", title: L("Past 30 days"), games: []), Group(id: "earlier", title: L("Earlier"), games: []),
+                      Group(id: "never", title: L("Never played"), games: [])]
             for game in games {
                 let index: Int
                 if let played = game.lastPlayed {
@@ -2781,7 +3119,7 @@ struct LibraryGroupedGames<LocalCell: View>: View {
         var result = Sources()
         let query = search.trimmingCharacters(in: .whitespaces)
         var steamEntries: [Int: (position: Int, entry: LibraryEntry)] = [:]
-        for (position, entry) in library.entries.enumerated() where entry.desktop != true {
+        for (position, entry) in library.entries.enumerated() where entry.desktop != true && entry.listedInLibrary {
             if let appID = entry.steamAppID { steamEntries[appID] = (position, entry) }
             else if query.isEmpty || entry.title.localizedCaseInsensitiveContains(query) {
                 result.entries[entry.id] = entry
@@ -2923,7 +3261,7 @@ struct LibraryView: View {
     @ObservedObject private var steamLibrary = SteamOwnedLibrary.shared
     private var entries: [LibraryEntry] {
         // Steam games are listed in their own section (SteamGames.swift).
-        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.ubisoftSpaceId == nil && $0.ubisoftLaunchId == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
+        let visible = model.entries.filter { $0.desktop != true && $0.listedInLibrary && $0.steamAppID == nil && $0.epicAppName == nil && $0.itchGameID == nil && $0.eaOfferID == nil && $0.ubisoftSpaceId == nil && $0.ubisoftLaunchId == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
         if sort == "added" { return visible.reversed() }
         return visible.sorted {
             if sort == "played", $0.lastPlayed != $1.lastPlayed { return ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast) }
@@ -2958,14 +3296,14 @@ struct LibraryView: View {
                 .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
                 .tabItem { Image(systemName: "square.grid.2x2.fill").accessibilityLabel("Library") }
                 .tag(0)
-            settings
+            settingsTab
                 .tabItem { Image(systemName: "gearshape.fill").accessibilityLabel("Settings") }
                 .tag(1)
         }
         // The system search field (Liquid Glass on iOS 26) in the title's place, left
         // of the library's buttons, on both tabs; each tab keeps its own text.
         .background(LibraryNavSearch(text: tab == 0 ? $search : $settingsSearch,
-                                     placeholder: tab == 0 ? "Search your library" : "Search settings")
+                                     placeholder: tab == 0 ? L("Search your library") : L("Search settings"))
             .frame(width: 0, height: 0))
         // Each tab is hosted by the tab bar controller, so a toolbar set inside a tab
         // would not reach the navigation bar: the library's lives here.
@@ -2981,13 +3319,15 @@ struct LibraryView: View {
         // On the tab view, not inside one tab's page: an alert attached to the Library
         // page cannot present while Settings is showing, so an error raised there (its
         // Enable JIT, for one) waited until the Library tab came back.
-        .alert(jitProblem == nil ? "Library" : "Couldn't Enable JIT",
+        .alert(jitProblem == nil ? L("Library") : L("Couldn't Enable JIT"),
                isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             if let jitProblem { jitConnectionActions(jitProblem, retry: enableJIT) { model.error = nil } }
             Button("OK", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
         // Signing that runs out: the refresh, and the offer when it could not run (SigningRefresh.swift).
         .modifier(SigningRefreshOffer())
+        // A setup opened from Files, a chat or a madeira://setup link (GameSetupShare.swift).
+        .modifier(GameSetupInboxPresenter())
         .fullScreenCover(isPresented: $onboarding.presented) { OnboardingView() }
         .onAppear {
             // An ended desktop session's surface never stays over the library.
@@ -3069,6 +3409,17 @@ struct LibraryView: View {
         let q = settingsSearch.trimmingCharacters(in: .whitespaces)
         return q.isEmpty || words.contains { $0.localizedCaseInsensitiveContains(q) || q.localizedCaseInsensitiveContains($0) }
     }
+    /// The Display and Memory and sync settings, on the long page and as pages.
+    static var runtimeSettingsShown: Bool { MadeiraConfig.flag("MADEIRA_RUNTIME_SETTINGS") }
+    /// The Settings tab: its pages (SettingsPages.swift), or, while the search field holds
+    /// text or with env.MADEIRA_SETTINGS_PAGES = 0, the one long page below.
+    @ViewBuilder private var settingsTab: some View {
+        if SettingsPages.enabled, settingsSearch.trimmingCharacters(in: .whitespaces).isEmpty {
+            SettingsPagesList(startDock: startDock)
+        } else {
+            settings
+        }
+    }
     private var settings: some View {
         Form {
             // The status sits on the page, not in a card; JIT is enabled from the
@@ -3079,11 +3430,15 @@ struct LibraryView: View {
             if settingsShow("JIT", "StikDebug", "built-in", "pairing", "LocalDevVPN") {
                 JITSettingsSection()
             }
-            if settingsShow("signing", "expires", "refresh", "Apple", "sign-in", "7 days") { SigningSettingsSection() }
-            if settingsShow("diagnostics", "extended logging", "logging", "log") {
+            if SigningRefresh.enabled, settingsShow("signing", "expires", "refresh", "Apple", "sign-in", "7 days") { SigningSettingsSection() }
+            if settingsShow("diagnostics", "extended logging", "logging", "log", "help", "Claude") {
                 Section {
                     Toggle("Extended logging", isOn: $input.diagnostics)
-                } header: { Text("Diagnostics") }
+                    // ClaudeHelp.swift: the fixes guide, logs and madeira.cfg to a chat.
+                    ClaudeHelpButton(entry: nil)
+                } header: { Text("Diagnostics") } footer: {
+                    Text("Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.")
+                }
             }
             if settingsShow("pointer", "mouse", "cursor", "touch", "trackpad", "sensitivity") {
                 Section("Pointer") { LibraryPointerSettings() }
@@ -3101,14 +3456,20 @@ struct LibraryView: View {
             if SteamSettingsSection.shown, settingsShow("Steam", "Dock", "sign in", "account", "setup") {
                 SteamSettingsSection(open: { settingsSheet = $0 })
             }
+            if ItchLibrary.enabled, settingsShow("itch.io", "itch", "API key", "sign in", "account") { ItchSettingsSection() }
             if EpicLibrary.enabled, settingsShow("Epic", "Epic Games", "sign in", "account") {
                 EpicSettingsSection(open: { settingsSheet = $0 })
             }
             if UbisoftLibrary.enabled, settingsShow("Ubisoft", "Ubisoft Connect", "Uplay", "sign in", "account", "Assassin's Creed") {
                 UbisoftSettingsSection(open: { settingsSheet = $0 })
             }
+            if EALibrary.enabled, settingsShow("EA", "EA app", "Origin", "sign in", "account") {
+                EASettingsSection(open: { settingsSheet = $0 })
+            }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow(".NET", "desktop runtime", "dotnet", "WPF", "WinForms", "runtime") { WindowsRuntimeSettingsSection() }
+            if VCRedistModel.enabled, settingsShow("Visual C++", "C++", "runtime", "redist", "vcredist", "download") { VCRedistSettingsSection() }
+            if settingsShow("Gecko", "Wine Gecko", "web", "HTML", "Internet Explorer", "download") { WineGeckoSettingsSection() }
             if settingsShow("Ubisoft", "Uplay", "Epic", "Rockstar", "launcher", "sign in", "Assassin's Creed") { LauncherSupportSettingsSection() }
             if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
             if settingsShow("external", "drive", "USB", "SSD", "storage") { ExternalDrivesSection() }
@@ -3144,19 +3505,7 @@ struct LibraryView: View {
             }
             // Credits, last on the Settings page.
             if settingsShow("credits", "thanks", "Will Faust", "Nick", "125hz", "Jfishin", "Jesse", "JesseLovelace", "Dan Perks", "danperks", "bahacan16", "spitefulowl", "meshoklv", "TheHadesc") {
-                Section {
-                    MadeiraCredit(name: "Will Faust", handle: "willfaust", role: "Created Madeira")
-                    MadeiraCredit(name: "Nick", handle: "125hz", role: "32-bit game support, the game library and Madeira Dock")
-                    MadeiraCredit(name: "Jfishin", handle: "Jfishin", role: "The original native Steam sign-in, library and downloads")
-                    MadeiraCredit(name: "Jesse", handle: "JesseLovelace", role: "Steam Cloud saves, faster game launches, and fixes that let more games run")
-                    MadeiraCredit(name: "Dan Perks", handle: "danperks", role: "In-app JIT without StikDebug, and pairing without a computer")
-                    MadeiraCredit(name: "bahacan16", handle: "bahacan16", role: "Direct3D 12 and DXMT fixes, game launcher windows, per-game settings, PlayStation controllers, and save backups")
-                    MadeiraCredit(name: "spitefulowl", handle: "spitefulowl", role: "Wine and FEX runtime fixes, DXMT texture and memory fixes, audio, the swap tier, and library launch options")
-                    MadeiraCredit(name: "meshoklv", handle: "meshoklv", role: "Controller fixes for games that ship their own XInput or need focus, touch taps that stay off the mouse, and a crash-guard fix")
-                    MadeiraCredit(name: "TheHadesc", handle: "TheHadesc", role: "Madeira Dock starts for games whose Steam launch entries do not start at zero, and a touch gamepad that survives the in-game keyboard")
-                } header: { Text("Credits") } footer: {
-                    Text("Madeira is built on Wine, FEX-Emu, DXMT by Feifan He (3Shain) with the Direct3D 9 frontend by David Acevedo (dacevedo12), rpmalloc by Mattias Jansson, StikDebug, StikJIT and idevice. Thank you to everyone who contributes to these projects.")
-                }
+                SettingsCreditsSection()
             }
         }
         .alert("Restart Madeira", isPresented: $restartNotice) {
@@ -3173,6 +3522,7 @@ struct LibraryView: View {
             case .steamSignIn: SteamSignInView()
             case .epicSignIn: EpicSignInView()
             case .ubisoftSignIn: UbisoftSignInView()
+            case .eaSignIn: EASignInView()
             case .dock: MadeiraDockView(start: startDock)
             }
         }
@@ -3207,14 +3557,14 @@ struct LibraryView: View {
                 if SteamGamesSection.shown {
                     VStack(alignment: .leading, spacing: 14) {
                         // Games are added with the + in the navigation bar.
-                        LibrarySectionHeader(title: "Other games", count: entries.count,
+                        LibrarySectionHeader(title: L("Other games"), count: entries.count,
                                              collapsed: SteamGamesSection.collapsible ? $hideOthers : nil) { EmptyView() }
                         if hideOthers && SteamGamesSection.collapsible {
                             EmptyView()
                         } else if entries.isEmpty {
                             Text(search.isEmpty
                                  ? "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."
-                                 : "No other games match your search.")
+                                 : L("No other games match your search."))
                                 .foregroundStyle(.secondary)
                         } else {
                             cells(entries, width: viewport.size.width)
@@ -3224,10 +3574,15 @@ struct LibraryView: View {
                         SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
                     }
-                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.ubisoftSpaceId == nil && $0.ubisoftLaunchId == nil }).isEmpty {
+                } else if model.entries.filter({ $0.desktop != true && $0.listedInLibrary && $0.steamAppID == nil && $0.epicAppName == nil && $0.itchGameID == nil && $0.eaOfferID == nil && $0.ubisoftSpaceId == nil && $0.ubisoftLaunchId == nil }).isEmpty {
                     ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
                     cells(entries, width: viewport.size.width)
+                }
+                // The account's itch.io games (ItchGames.swift): installed ones open their
+                // Game details page, the others their download sheet.
+                if ItchLibrary.enabled {
+                    ItchGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 // The account's Epic Games games (EpicGames.swift): installed ones open their
                 // Game details page, the others their download sheet.
@@ -3239,6 +3594,11 @@ struct LibraryView: View {
                 // the install to Ubisoft Connect in the prefix.
                 if UbisoftLibrary.enabled {
                     UbisoftGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
+                }
+                // The account's EA app games (EAGames.swift): installed ones open their
+                // Game details page, the others their download sheet.
+                if EALibrary.enabled {
+                    EAGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 }
             }
@@ -3299,6 +3659,30 @@ struct LibraryView: View {
                 .animation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.4), value: liquidMetal.on)
                 .id(LibraryEntry.desktopID)
                 .overlay(RoundedRectangle(cornerRadius: 22).stroke(focused == LibraryEntry.desktopID && controller.connected ? Color.cyan : .clear, lineWidth: 3))
+            // ml2021: Valve's client in Big Picture, beside the Desktop, once Steam is installed in the prefix;
+            // only in builds with MADEIRA_BIG_PICTURE_UI (LibraryEntry.bigPictureShown).
+#if MADEIRA_BIG_PICTURE_UI
+            if LibraryEntry.steamClientInstalled {
+                Button { selected = model.entries.first(where: { $0.bigPicture == true }) ?? .bigPictureEntry } label: {
+                    if liquidMetal.on {
+                        let light = colorScheme == .light
+                        Label("Big Picture", systemImage: "gamecontroller")
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(light ? .black : .white)
+                            .shadow(color: (light ? Color.white : .black).opacity(0.75), radius: 2.5)
+                            .padding(.horizontal, 14).frame(minHeight: 44)
+                            .background(LiquidMetalFill())
+                            .contentShape(Capsule())
+                    } else {
+                        Label("Big Picture", systemImage: "gamecontroller")
+                            .font(.subheadline.weight(.medium)).padding(.horizontal, 14).frame(minHeight: 44)
+                            .background(Color(uiColor: .secondarySystemGroupedBackground), in: Capsule())
+                    }
+                }.buttonStyle(.plain)
+                    .animation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.4), value: liquidMetal.on)
+                    .id(LibraryEntry.bigPictureID)
+                    .accessibilityHint("Steam's gamepad interface in the Wine desktop")
+            }
+#endif
         }
     }
     /// The zoomable page (LibraryGridPage.swift): the card layouts as one pinchable collection view, with the same sheets and rules as `library`.
@@ -3480,6 +3864,12 @@ struct LibraryDetail: View {
     @State private var leaving = false
     @State private var error: String?
     @State private var copiedLink = false
+    /// Share Setup and Apply Shared Setup (GameSetupShare.swift).
+    @State private var shareSetup = false
+    @State private var askSetupSource = false
+    @State private var importSetup = false
+    @State private var setupToApply: GameSetupInbox.Pending?
+    @State private var setupError: String?
     /// Where Play is on screen: the starting screen grows out of it (LaunchCurtain).
     @State private var playFrame: CGRect = .zero
     /// Settings › Sync engine, read when the details open: the fastsync switches
@@ -3526,6 +3916,11 @@ struct LibraryDetail: View {
         model.save(entry)
         reloadBCD()
     }
+    /// Apply Shared Setup: reads the setup, then shows what it holds before applying.
+    private func readSetup(_ read: () throws -> GameSetup) {
+        do { setupToApply = GameSetupInbox.Pending(setup: try read()) }
+        catch { setupError = error.localizedDescription }
+    }
     /// "None", or how many keys this game's own config sets.
     static func configSummary(_ config: String?) -> String {
         let count = MadeiraConfig.parse(config ?? "").count
@@ -3536,18 +3931,40 @@ struct LibraryDetail: View {
         // A Steam game starts through Madeira Dock (ContentView.launchLibraryEntry)
         // once its files are complete and Dock can sign in; "The game" once its
         // program is chosen (no client or sign-in involved).
+        // An itch.io game starts once its files are complete (ItchLibrary).
+        if let game = entry.itchGameID {
+            if ItchLibrary.shared.downloads[game] != nil {
+                error = L("This game's download has not finished. Resume it and wait for it to complete before playing."); return
+            }
+            if ItchLibrary.shared.installed[game] == nil {
+                error = L("This itch.io game is no longer installed. Install it again from the itch.io section."); return
+            }
+        }
+        // An EA game starts once its files are complete and the account is signed in
+        // (EALibrary.prepareLaunch gets its licence and the EA app's environment).
+        if let offer = entry.eaOfferID {
+            if EALibrary.shared.downloads[offer] != nil {
+                error = "This game's download has not finished. Resume it and wait for it to complete before playing."; return
+            }
+            if EALibrary.shared.installed[offer] == nil {
+                error = "This EA game is no longer installed. Install it again from the EA app section."; return
+            }
+            if !EALibrary.shared.signedIn {
+                error = "Sign in to EA in Settings › EA app first. An EA game needs the sign-in to get its licence and start."; return
+            }
+        }
         // An Epic game starts once its files are complete (EpicLibrary).
         if let app = entry.epicAppName {
             if EpicLibrary.shared.downloads[app] != nil {
-                error = "This game's download has not finished. Resume it and wait for it to complete before playing."; return
+                error = L("This game's download has not finished. Resume it and wait for it to complete before playing."); return
             }
             if EpicLibrary.shared.installed[app] == nil {
-                error = "Epic Games no longer lists this game as installed. Install it again from the Epic Games section."; return
+                error = L("Epic Games no longer lists this game as installed. Install it again from the Epic Games section."); return
             }
         }
         if let appID = entry.steamAppID {
             if SteamOwnedLibrary.shared.downloads[appID] != nil {
-                error = "This game's update has not finished. Resume it and wait for it to complete before playing."; return
+                error = L("This game's update has not finished. Resume it and wait for it to complete before playing."); return
             }
             let installed = SteamGamesModel.shared.games.first { $0.id == appID }?.installed ?? false
             if entry.startsSteamGameDirectly {
@@ -3578,7 +3995,7 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, library, iniFiles, advanced
+        case display, controls, launch, compatibility, steam, cloud, achievements, itch, library, iniFiles, advanced
         var title: String {
             switch self {
             case .display: return "Display"
@@ -3587,6 +4004,9 @@ struct LibraryDetail: View {
             case .compatibility: return "Compatibility"
             case .steam: return "Steam"
             case .cloud: return "Steam Cloud"
+            case .workshop: return "Steam Workshop"
+            case .itch: return "itch.io"
+            case .achievements: return "Achievements"
             case .library: return "Library details"
             case .iniFiles: return "Settings files"
             case .advanced: return "Advanced"
@@ -3600,28 +4020,41 @@ struct LibraryDetail: View {
             case .compatibility: return "cpu"
             case .steam: return "shippingbox"
             case .cloud: return "icloud"
+            case .workshop: return "square.stack.3d.up"
+            case .itch: return "bag"
+            case .achievements: return "trophy"
             case .library: return "info.circle"
             case .iniFiles: return "doc.text"
             case .advanced: return "wrench.and.screwdriver"
             }
         }
+        /// A Steam game's Steam Workshop items (SteamWorkshop.swift).
+        case workshop
     }
     @State private var path: [Page] = []
     /// The rows of the details page, in groups. The Desktop entry has no launch options
     /// or library details; a Steam game has its Steam pages.
     private var pageGroups: [[Page]] {
         let launch = entry.usesLaunchOptions || entry.desktop != true
-        let steam: [Page] = entry.steamAppID == nil ? [] : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
+        let steam: [Page] = entry.steamAppID == nil ? (entry.itchGameID != nil ? [.itch] : [])
+            : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud, .achievements] : [.steam, .achievements])
+                + (SteamOwnedLibrary.workshopEnabled && Self.showsWorkshop(entry.steamAppID) ? [.workshop] : [])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
         let more: [Page] = entry.desktop == true ? [.advanced] : [.library, .iniFiles, .advanced]
         return [tuning, steam, more].filter { !$0.isEmpty }
+    }
+    /// Steam Workshop is offered unless Steam says the game has none
+    /// (SteamOwnedGame.workshop; unknown in older caches).
+    @MainActor private static func showsWorkshop(_ appID: Int?) -> Bool {
+        guard let appID else { return false }
+        return SteamOwnedLibrary.shared.game(appID)?.workshop != false
     }
     /// The value a page's row shows, when one setting sums it up.
     private func summary(_ page: Page) -> String? {
         switch page {
         case .display: return entry.metalFXUpscale.map { "\(entry.resolution) · MetalFX \($0 == 2 ? "2" : "1.5")×" } ?? entry.resolution
         case .controls: return entry.controllerMode == "keys" ? "Keyboard and mouse" : entry.controllerMode == "dinput" ? "XInput and DirectInput" : nil
-        case .launch: return entry.usesLaunchOptions ? (entry.runsInDesktop ? "Wine desktop" : "Directly") : nil
+        case .launch: return entry.usesLaunchOptions ? (entry.runsInDesktop ? L("Wine desktop") : L("Directly")) : nil
         case .steam: return entry.startsSteamGameDirectly ? "The game" : "Madeira Dock"
         case .advanced: return Self.configSummary(bcd.configText)   // madeira-bcd: the game's own config file
         case .iniFiles:
@@ -3640,6 +4073,12 @@ struct LibraryDetail: View {
             case .compatibility: compatibilityPage
             case .steam: steamPage
             case .cloud: if let appID = entry.steamAppID { SteamCloudSection(appID: appID) }
+            case .workshop:
+                if let appID = entry.steamAppID, appID > 0, appID <= Int(UInt32.max) {
+                    SteamWorkshopSections(appID: UInt32(appID), title: entry.title)
+                }
+            case .itch: ItchEntrySection(entry: $entry) { leaving = true; dismiss() }
+            case .achievements: if let appID = entry.steamAppID { SteamAchievementsSection(appID: appID) }
             case .library: libraryPage
             case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)
             case .advanced: advancedPage
@@ -3709,6 +4148,13 @@ struct LibraryDetail: View {
                     }
                 }
             }
+            if GamepadInput.enabled {
+                NavigationLink("Gyro aim & turbo") {
+                    Form { PadAssistPage(settings: $entry.padAssist) }
+                        .navigationTitle("Gyro aim & turbo")
+                        .toolbar { Button("Reset") { entry.padAssist = nil }.disabled(entry.padAssist == nil) }
+                }
+            }
             LabeledContent("Control opacity") {
                 Slider(value: Binding(get: { entry.controlOpacity ?? 0.7 }, set: { entry.controlOpacity = $0 }), in: 0.15...1)
             }
@@ -3760,39 +4206,59 @@ struct LibraryDetail: View {
                 Text(entry.commandPreview)
                     .font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
             } header: { Text("Launch arguments") } footer: {
-                Text(entry.steamAppID == nil ? "Passed on every start. Above: the full command." : "Steam adds these to the selected launch option on every start.")
+                Text(entry.steamAppID == nil ? L("Passed on every start. Above: the full command.") : L("Steam adds these to the selected launch option on every start."))
             }
         }
     }
 
     @ViewBuilder private var compatibilityPage: some View {
         Section {
-            Toggle(isOn: $entry.reducedX87) { compatLabel("Reduced-precision x87", "Faster, less accurate") }
+            Picker(selection: $entry.x87Precision) {
+                Text("Automatic").tag(LibraryEntry.X87Precision.automatic)
+                Text("Reduced (faster)").tag(LibraryEntry.X87Precision.reduced)
+                Text("Full (accurate)").tag(LibraryEntry.X87Precision.full)
+            } label: {
+                compatLabel(L("x87 precision"), L("Automatic is fast for 32-bit games and accurate for 64-bit ones. Full can halve a 32-bit game's frame rate."))
+            }
             Toggle(isOn: Binding(get: { entry.largeReservations ?? false }, set: { entry.largeReservations = $0 ? true : nil })) {
-                compatLabel("Large memory reservations", "For requests of 64 GB or more. Backs up to 16 GB by default.")
+                compatLabel(L("Large memory reservations"), L("For requests of 64 GB or more. Backs up to 16 GB by default."))
             }
             // madeira-bcd: AVX, NVIDIA and Wine's C++ runtime are LibraryPrefs, which
             // BCDLaunch exports at every launch (reloadBCD / migrateEntryOptions).
             Toggle(isOn: Binding(get: { bcd.avx }, set: { on in bcd.avx = on; LibraryPrefs.setAVX(on, for: entry.windowsPath) })) {
-                compatLabel("AVX and AVX2", "For games that quit with c000001d")
+                compatLabel(L("AVX and AVX2"), L("For games that quit with c000001d"))
             }
             // Exported for this game only when chosen (applyEnvironment).
             Picker("CPU cores reported", selection: Binding(get: { entry.cpuCount ?? 0 }, set: { entry.cpuCount = $0 == 0 ? nil : $0 })) {
                 Text("Automatic").tag(0)
                 ForEach([1, 2, 4, 6], id: \.self) { Text("\($0)").tag($0) }
             }
-            Picker("D3D9 anisotropic filtering", selection: Binding(get: { entry.anisotropyLimit ?? 0 }, set: { entry.anisotropyLimit = $0 == 0 ? nil : $0 })) {
-                Text("Application default").tag(0)
-                ForEach([1, 2, 4, 8], id: \.self) { Text("Up to \($0)×").tag($0) }
+            // Hidden: an old build's switch the D3D9 path no longer needs. A game that has a limit still exports it, and
+            // keeps the picker so it can go back to Application default.
+            if entry.anisotropyLimit != nil {
+                Picker("D3D9 anisotropic filtering", selection: Binding(get: { entry.anisotropyLimit ?? 0 }, set: { entry.anisotropyLimit = $0 == 0 ? nil : $0 })) {
+                    Text("Application default").tag(0)
+                    ForEach([1, 2, 4, 8], id: \.self) { Text("Up to \($0)×").tag($0) }
+                }
             }
-            Toggle(isOn: Binding(get: { bcd.nvidia }, set: { on in bcd.nvidia = on; LibraryPrefs.setNvidia(on, for: entry.windowsPath) })) {
-                compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors")
+            // GPUCards.swift: a chosen card replaces the two NVIDIA switches below.
+            Picker(selection: Binding(get: { bcd.gpuCard }, set: { id in bcd.gpuCard = id; LibraryPrefs.setGPUCard(id, for: entry.windowsPath) })) {
+                Text("Automatic").tag("")
+                ForEach(GPUCards.all, id: \.id) { Text($0.title).tag($0.id) }
+            } label: {
+                compatLabel("Graphics card the game sees", "For games that refuse this GPU or only run on cards they know")
             }
-            Toggle(isOn: Binding(get: { bcd.olderNvidia }, set: { on in bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath) })) {
-                compatLabel("Older NVIDIA card (Direct3D 9)", "For older games that crash with this GPU, like Fallout 3 and New Vegas")
+            Group {
+                Toggle(isOn: Binding(get: { bcd.nvidia }, set: { on in bcd.nvidia = on; LibraryPrefs.setNvidia(on, for: entry.windowsPath) })) {
+                    compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors")
+                }
+                Toggle(isOn: Binding(get: { bcd.olderNvidia }, set: { on in bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath) })) {
+                    compatLabel("Older NVIDIA card (Direct3D 9)", "For older games that crash with this GPU, like Fallout 3 and New Vegas")
+                }
             }
+            .disabled(GPUCards.card(bcd.gpuCard) != nil)
             Toggle(isOn: Binding(get: { bcd.wineVCRT }, set: { on in bcd.wineVCRT = on; LibraryPrefs.setWineVCRT(on, for: entry.windowsPath) })) {
-                compatLabel("Wine's C++ runtime", "Instead of the game's msvcp/vcruntime")
+                compatLabel(L("Wine's C++ runtime"), L("Instead of the game's msvcp/vcruntime"))
             }
             // madeira-bcd: MADEIRA_REAL_SUSPEND for this game (BCDLaunch.realSuspend).
             Picker(selection: Binding(get: { bcd.realSuspend.map { $0 ? 1 : 2 } ?? 0 },
@@ -3801,7 +4267,7 @@ struct LibraryDetail: View {
                 Text("On").tag(1)
                 Text("Off").tag(2)
             } label: {
-                compatLabel("Pause threads fully", "For Unity games that crash while loading, like Megabonk. Can make other games freeze")
+                compatLabel(L("Pause threads fully"), L("For Unity games that crash while loading, like Megabonk. Can make other games freeze"))
             }
             // Fastsync-only switches: shown for every game, usable only while
             // Settings › Sync engine is Fastsync.
@@ -3845,7 +4311,7 @@ struct LibraryDetail: View {
             TextField("Title", text: $entry.title)
             Button("Find on Steam", systemImage: "magnifyingglass") { findCover = true }
             Button("Choose cover image", systemImage: "photo") { importCover = true }
-            if entry.coverFile != nil { Button((entry.steamAppID ?? entry.steamID) != nil ? "Use Steam artwork" : "Remove cover image") { entry.coverFile = nil } }
+            if entry.coverFile != nil { Button((entry.steamAppID ?? entry.steamID) != nil ? L("Use Steam artwork") : L("Remove cover image")) { entry.coverFile = nil } }
         } }
         // A link that starts this game from a Home Screen icon (SavesAndShortcuts.swift).
         if entry.desktop != true {
@@ -3854,7 +4320,7 @@ struct LibraryDetail: View {
                     UIPasteboard.general.string = ShortcutRouter.link(for: entry.windowsPath)
                     copiedLink = true
                 } label: {
-                    Label(copiedLink ? "Link copied" : "Copy Home Screen shortcut link",
+                    Label(copiedLink ? L("Link copied") : L("Copy Home Screen shortcut link"),
                           systemImage: copiedLink ? "checkmark" : "link")
                 }
             } header: { Text("Home Screen") } footer: {
@@ -3951,6 +4417,9 @@ struct LibraryDetail: View {
                 if entry.ubisoftSpaceId != nil || entry.ubisoftLaunchId != nil {
                     UbisoftEntrySection(entry: $entry)
                 }
+                if entry.eaOfferID != nil {
+                    EAEntrySection(entry: $entry) { leaving = true; dismiss() }
+                }
                 Section {
                     FPSChoice(mode: $entry.fpsMode)
                     Toggle("Performance overlay", isOn: $entry.performance)
@@ -3971,10 +4440,18 @@ struct LibraryDetail: View {
                 }
                 // madeira-bcd: always last, for every entry, the Desktop too (GameRecommendationsApply.swift).
                 Section {
+                    Button("Share Setup", systemImage: "square.and.arrow.up") { model.save(entry); shareSetup = true }
+                    Button("Apply Shared Setup", systemImage: "square.and.arrow.down") { askSetupSource = true }
+                        .confirmationDialog("Apply a shared setup", isPresented: $askSetupSource, titleVisibility: .visible) {
+                            Button("Choose a File") { importSetup = true }
+                            Button("Paste from Clipboard") { readSetup { try GameSetup(text: UIPasteboard.general.string ?? "") } }
+                        }
                     Button("Copy Settings", systemImage: "doc.on.doc") {
                         let configText = entry.config ?? ""
                         UIPasteboard.general.string = configText.isEmpty ? "# Default configuration" : configText
                     }
+                    // ClaudeHelp.swift: the fixes guide, the logs and this game's config to a chat.
+                    ClaudeHelpButton(entry: entry)
                     Button("Reset to Recommended", systemImage: "arrow.counterclockwise") { confirmReset = true }
                         .confirmationDialog(GameRecommendations.question(recommended, desktop: entry.desktop == true),
                                             isPresented: $confirmReset, titleVisibility: .visible) {
@@ -3982,6 +4459,10 @@ struct LibraryDetail: View {
                         }
                 } footer: {
                     Text(GameRecommendations.note(recommended, desktop: entry.desktop == true))
+                }
+                .fileImporter(isPresented: $importSetup,
+                              allowedContentTypes: [GameSetup.contentType, .json, .plainText, .data]) { result in
+                    readSetup { try GameSetup.read(file: try result.get()) }
                 }
             }
             .navigationTitle("Game details").navigationBarTitleDisplayMode(.inline)
@@ -4002,16 +4483,32 @@ struct LibraryDetail: View {
                 reloadBCD()
             }
         }
+        .sheet(isPresented: $shareSetup) { GameSetupShareSheet(entry: entry) }
+        .sheet(item: $setupToApply) { pending in
+            GameSetupApplySheet(setup: pending.setup, gameTitle: entry.title,
+                                otherGame: pending.setup.match(steamAppID: entry.steamAppID, program: GameSetup.programName(entry)) == 0) { controls, ini in
+                do {
+                    try pending.setup.apply(to: &entry, controls: controls, iniFiles: ini)
+                    model.save(entry)
+                    reloadBCD()
+                } catch {
+                    setupError = "This setup could not be applied: \(error.localizedDescription)"
+                }
+            }
+        }
+        .alert("Shared setup", isPresented: Binding(get: { setupError != nil }, set: { if !$0 { setupError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(setupError ?? "") }
         .sheet(isPresented: $findCover) { SteamSearchView(query: entry.title) { match in entry.steamID = match.id; entry.title = match.name; entry.coverFile = nil } }
         .fileImporter(isPresented: $importCover, allowedContentTypes: [.image]) { result in
             do {
                 let url = try result.get(); let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
                 let attrs = try url.resourceValues(forKeys: [.fileSizeKey])
-                guard (attrs.fileSize ?? Int.max) <= 20_000_000 else { throw LibraryError.message("Choose an image smaller than 20 MB.") }
+                guard (attrs.fileSize ?? Int.max) <= 20_000_000 else { throw LibraryError.message(L("Choose an image smaller than 20 MB.")) }
                 let data = try Data(contentsOf: url)
                 guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                       let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 1200, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary),
-                      let jpeg = UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.85) else { throw LibraryError.message("This image could not be opened.") }
+                      let jpeg = UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.85) else { throw LibraryError.message(L("This image could not be opened.")) }
                 let dir = LibraryModel.documents.appendingPathComponent("madeira-art", isDirectory: true)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 let name = entry.id.uuidString + ".jpg"; try jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)
@@ -4036,6 +4533,7 @@ struct LibraryDetail: View {
 /// LibraryPrefs' switches and the GameProfiles.swift file's lines.
 struct BCDGameValues {
     var avx = false, nvidia = false, olderNvidia = false, wineVCRT = false
+    var gpuCard = ""
     var realSuspend: Bool? = nil, unityIL2CPP = false
     var configText = ""
     init() {}
@@ -4043,6 +4541,7 @@ struct BCDGameValues {
         avx = LibraryPrefs.avx(windowsPath)
         nvidia = LibraryPrefs.nvidia(windowsPath)
         olderNvidia = LibraryPrefs.olderNvidia(windowsPath)
+        gpuCard = LibraryPrefs.gpuCard(windowsPath) ?? ""
         wineVCRT = LibraryPrefs.wineVCRT(windowsPath)
         realSuspend = LibraryPrefs.realSuspend(windowsPath)
         configText = GameProfile(windowsPath: windowsPath).text
@@ -4099,7 +4598,7 @@ struct SteamSearchView: View {
             .task(id: submitted) {
                 guard !submitted.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                 loading = true; error = nil
-                do { let found = try await SteamCatalog.search(submitted); try Task.checkCancellation(); results = found; if found.isEmpty { error = "No matches. Try a different title." } }
+                do { let found = try await SteamCatalog.search(submitted); try Task.checkCancellation(); results = found; if found.isEmpty { error = L("No matches. Try a different title.") } }
                 catch is CancellationError { return }
                 catch { self.error = error.localizedDescription }
                 loading = false
@@ -4295,15 +4794,15 @@ struct DockOfflineMark: View {
         }
         .buttonStyle(.plain)
         .task { preparedOnline = MadeiraDock.games(drive: MadeiraDock.drive).first { $0.id == appID }?.customExecutables ?? false }
-        .alert(ready ? "Can be played offline" : "Not ready for offline play yet", isPresented: $explain) {
+        .alert(ready ? L("Can be played offline") : L("Not ready for offline play yet"), isPresented: $explain) {
             Button("OK", role: .cancel) {}
         } message: { Text(Self.explanation(mark)) }
     }
     static func line(_ mark: DockOffline.Mark) -> String {
         switch mark {
-        case .ready: return "Can be played offline"
-        case .needsFirstStart: return "Start once online to play offline"
-        case .needsOnline: return "Start a game online to play offline"
+        case .ready: return L("Can be played offline")
+        case .needsFirstStart: return L("Start once online to play offline")
+        case .needsOnline: return L("Start a game online to play offline")
         }
     }
     static func explanation(_ mark: DockOffline.Mark) -> String {
@@ -4378,7 +4877,7 @@ struct LaunchFlagChips: View {
                     Button(flag) { arguments = Self.toggled(arguments, flag) }
                         .buttonStyle(.bordered).tint(on ? Color.accentColor : Color.gray)
                         .font(.caption.monospaced())
-                        .accessibilityValue(on ? "On" : "Off")
+                        .accessibilityValue(on ? L("On") : L("Off"))
                 }
             }
         }
@@ -4445,7 +4944,7 @@ struct MadeiraCredit: View {
 /// MADEIRA_RUNTIME_SETTINGS=0 hides this section.
 /// A sheet opened from Settings; LibraryView presents it from the Form itself.
 enum SettingsSheet: String, Identifiable {
-    case allSettings, steamSignIn, epicSignIn, ubisoftSignIn, dock
+    case allSettings, steamSignIn, epicSignIn, ubisoftSignIn, eaSignIn, dock
     var id: String { rawValue }
 }
 
@@ -4461,8 +4960,8 @@ enum SyncEngine: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .madsync: return "Madsync"
-        case .fastsync: return "Fastsync (default)"
-        case .wine: return "Wine standard sync"
+        case .fastsync: return L("Fastsync (default)")
+        case .wine: return L("Wine standard sync")
         }
     }
     /// The MADEIRA_FASTSYNC values Wine treats as "fastsync on" (sync.c, event.c).
@@ -4482,6 +4981,32 @@ enum SyncEngine: String, CaseIterable, Identifiable {
     }
 }
 
+/// Runs the extension memory experiment (MemoryHostTest.m): whether memory
+/// created by the MadeiraMemoryHost extension stays off Madeira's footprint.
+/// Results in Documents/memhost-test.txt and the log.
+struct MemoryHostTestRow: View {
+    @State private var running = false
+    @State private var last = ""
+    var body: some View {
+        Button {
+            running = true
+            last = "Starting…"
+            MadeiraMemoryHostTest({ line in
+                LogStore.shared.log("[memhost] \(line)")
+                DispatchQueue.main.async { last = line }
+            }, {
+                DispatchQueue.main.async { running = false }
+            })
+        } label: {
+            Label(running ? "Testing extension memory…" : "Test extension memory", systemImage: "memorychip")
+        }
+        .disabled(running)
+        if !last.isEmpty {
+            Text(last).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
 struct RuntimeMemorySyncSettings: View {
     /// Opens a Settings sheet (LibraryView owns the presentation).
     var open: (SettingsSheet) -> Void = { _ in }
@@ -4489,23 +5014,29 @@ struct RuntimeMemorySyncSettings: View {
     var refresh = 0
     /// The keys this section and Settings › Graphics own; All settings and the Settings
     /// search leave them out.
-    static let featuredKeys: Set<String> = Set(["pool", "vram-mb", "swap-mb", "env.MADEIRA_SWAP_COVERAGE", "inproc-sync",
-                                                "env.MADEIRA_FASTSYNC", "eco"]).union(GraphicsSettings.featuredKeys)
+    static let featuredKeys: Set<String> = Set(["pool", "vram-mb", "swap-mb", "env.MADEIRA_SWAP_COVERAGE", "donor-pool-mb", "swap-wow64",
+                                                "inproc-sync", "env.MADEIRA_FASTSYNC", "eco"]).union(GraphicsSettings.featuredKeys)
     // ml1241: 256 (the launch's lower bound) for the pool, 512 and 1024 for video memory
     // (winemetal accepts vram-mb >= 256), at the user's request.
     static let poolChoices = [0, 256, 512, 640, 768, 1024, 1152]          // 0 = the standard 896 MB
     static let vramChoices = [0, 512, 1024, 1536, 2048, 3072, 4096, 4352, 4608, 5120, 6144]   // 0 = automatic
     static let swapChoices = [0, 1024, 2048, 3072, 4096]
+    static let donorPoolChoices = [0, 2048, 4096, 6144]   // ml1150: the donor pool, 512 MB regions
     /// The stored value "" (no key) and "classic" are the same rules, unless
     /// madeira.cfg has swap-mode = 2 (then no key means broad, ml1257).
     static let coverageChoices: [(String, String)] = [
-        ("", "Large allocations (8 MB+)"), ("blocks", "All allocations of 1 MB+"), ("wide", "1 MB+ and overflow"),
-        ("broad", "Whole reservations 4 MB+ (broad)"),
+        ("", L("Large allocations (8 MB+)")), ("blocks", L("All allocations of 1 MB+")), ("wide", L("1 MB+ and overflow")),
+        ("broad", L("Whole reservations 4 MB+ (broad)")),
     ]
     @State private var poolMB = Self.intKey("pool")
     @State private var vramMB = Self.intKey("vram-mb")
     @State private var swapMB = Self.intKey("swap-mb")
+    @State private var donorPoolMB = Self.intKey("donor-pool-mb")
     @State private var coverage = Self.currentCoverage()
+    @State private var wow64 = MadeiraConfig.get("swap-wow64") ?? ""
+    static let wow64Choices: [(String, String)] = [
+        ("", "Donor RAM only"), ("1", "Donor RAM, then the swap file"), ("2", "Never tiered (RAM only)"),
+    ]
     @State private var engine = SyncEngine.current
     @State private var eco = MadeiraConfig.bool("eco", default: false)
     @State private var changed = false
@@ -4538,12 +5069,12 @@ struct RuntimeMemorySyncSettings: View {
 
     var body: some View {
         Section {
-            mbPicker("JIT pool", key: "pool", value: $poolMB, choices: Self.poolChoices,
-                     zero: "Default (896 MB)", label: { "\($0) MB" })
-            mbPicker("Video memory", key: "vram-mb", value: $vramMB, choices: Self.vramChoices,
-                     zero: "Automatic", label: Self.gb)
-            mbPicker("Swap tier", key: "swap-mb", value: $swapMB, choices: Self.swapChoices,
-                     zero: "Off", label: Self.gb)
+            mbPicker(L("JIT pool"), key: "pool", value: $poolMB, choices: Self.poolChoices,
+                     zero: L("Default (896 MB)"), label: { "\($0) MB" })
+            mbPicker(L("Video memory"), key: "vram-mb", value: $vramMB, choices: Self.vramChoices,
+                     zero: L("Automatic"), label: Self.gb)
+            mbPicker(L("Swap tier"), key: "swap-mb", value: $swapMB, choices: Self.swapChoices,
+                     zero: L("Off"), label: Self.gb)
             Picker("Swap coverage", selection: Binding(get: { coverage }, set: { mode in
                 coverage = mode; changed = true
                 // With swap-mode = 2 no key means broad, so classic is written out.
@@ -4552,6 +5083,20 @@ struct RuntimeMemorySyncSettings: View {
             })) {
                 ForEach(Self.coverageChoices, id: \.0) { Text($0.1).tag($0.0) }
                 if !Self.coverageChoices.contains(where: { $0.0 == coverage }) { Text(coverage).tag(coverage) }
+            }
+            .disabled(swapMB == 0)
+            mbPicker("Donor pool", key: "donor-pool-mb", value: $donorPoolMB, choices: Self.donorPoolChoices,
+                     zero: "Off", label: Self.gb)
+                .disabled(swapMB == 0)
+            // ml2021: a 32-bit program's memory takes donor RAM but never the swap file unless asked
+            // (madeira.cfg swap-wow64, virtual_ios.c ios_swap_wow64_policy).
+            Picker("32-bit programs", selection: Binding(get: { wow64 }, set: { choice in
+                wow64 = choice; changed = true
+                MadeiraConfig.set("swap-wow64", choice.isEmpty ? nil : choice)
+                LogStore.shared.log("[runtime-settings] swap-wow64=\(choice.isEmpty ? "donor" : choice)")
+            })) {
+                ForEach(Self.wow64Choices, id: \.0) { Text($0.1).tag($0.0) }
+                if !Self.wow64Choices.contains(where: { $0.0 == wow64 }) { Text(wow64).tag(wow64) }
             }
             .disabled(swapMB == 0)
             Picker("Sync engine", selection: Binding(get: { engine }, set: { choice in
@@ -4569,19 +5114,21 @@ struct RuntimeMemorySyncSettings: View {
             Button { open(.allSettings) } label: {
                 Label("All settings (\(ConfigCatalog.generated.count - Self.featuredKeys.count) more)", systemImage: "slider.horizontal.3")
             }
+            MemoryHostTestRow()
         } header: { Text("Memory & sync") } footer: {
             VStack(alignment: .leading, spacing: 4) {
                 Text("JIT pool is the memory reserved at launch for translated x86 code (256 to 1152 MB; below 512 MB, large games can run out of room for it).")
                 Text("Video memory is how much graphics memory games are told they have. Automatic sizes it from the memory free at launch. Too high can get Madeira closed for using too much memory; too low makes games keep reloading textures.")
                 Text("Swap tier moves game data to a file on this device's storage when memory runs short, up to the chosen size, at some speed cost. Coverage decides which allocations it moves: large ones only (8 MB and up, the default), every allocation of 1 MB and up, or those plus allocations that overflow the game's address range. Broad backs every new reservation of 4 MB and up (madeira.cfg swap-min-mb moves the floor) as it is made, so the small commits games make inside it are covered too, and the swap tier size limits the storage it uses. Wider coverage saves more memory but can slow a game down.")
+                Text("Donor pool gives the swap tier RAM that does not count against Madeira's memory limit: memory donated by Madeira's helper extension, which creates it, hands it over and exits, used before the swap file while the phone has memory to spare. It stops taking more when iOS reports memory pressure. Experimental; needs the swap tier on.")
                 Text("Sync engine: Fastsync (the default) handles events and semaphores in-process; its per-game options are in each game's details. Madsync is the older in-process engine. Wine standard sync uses neither. Only one engine runs at a time.")
                 Text("Eco mode starts every game with its threads at a low priority, which saves power but makes games run slower. Off by default. It is meant for loading screens: Eco mode in the in-game menu turns it on and off while a game runs.")
                 if changed { Text("Restart Madeira (close it from the app switcher) for these changes to apply.").foregroundStyle(.orange) }
             }
         }
         .onChange(of: refresh) { _, _ in
-            poolMB = Self.intKey("pool"); vramMB = Self.intKey("vram-mb"); swapMB = Self.intKey("swap-mb")
-            coverage = Self.currentCoverage(); engine = SyncEngine.current
+            poolMB = Self.intKey("pool"); vramMB = Self.intKey("vram-mb"); swapMB = Self.intKey("swap-mb"); donorPoolMB = Self.intKey("donor-pool-mb")
+            coverage = Self.currentCoverage(); wow64 = MadeiraConfig.get("swap-wow64") ?? ""; engine = SyncEngine.current
             eco = MadeiraConfig.bool("eco", default: false)
         }
     }
@@ -4600,8 +5147,8 @@ struct LibraryPointerSettings: View {
         Picker("Pointer mode", selection: mode) {
             Text("Absolute").tag("absolute"); Text("Relative").tag("relative"); Text("Touch").tag("touch")
         }.pickerStyle(.segmented)
-        Text(input.touchMode ? "Tap the screen to position and click. Hold and move to drag. Two fingers: right click or scroll."
-             : (input.relative ? "Drag to send relative mouse movement for mouse-look. Tap to click." : "Drag the pointer like a trackpad. Tap to click."))
+        Text(input.touchMode ? L("Tap the screen to position and click. Hold and move to drag. Two fingers: right click or scroll.")
+             : (input.relative ? L("Drag to send relative mouse movement for mouse-look. Tap to click.") : L("Drag the pointer like a trackpad. Tap to click.")))
             .font(.caption).foregroundStyle(.secondary)
         LabeledContent("Touch sensitivity") {
             Slider(value: input.relative ? $input.sensRel : $input.sensAbs, in: 0.1...8)
@@ -4626,11 +5173,11 @@ struct GraphicsSettings: View {
     var refresh = 0
 
     static let d3d9Choices: [(String, String)] = [
-        ("", "DXMT (default)"), ("native", "DXMT native frontend (32-bit)"), ("wined3d", "Wine wined3d on OpenGL (Zink)"),
+        ("", L("DXMT (default)")), ("native", L("DXMT native frontend (32-bit)")), ("wined3d", L("Wine wined3d on OpenGL (Zink)")),
     ]
-    static let d3d11Choices: [(String, String)] = [("", "DXMT (default)"), ("dxvk", "DXVK on Vulkan (experimental)")]
-    static let d3d12Choices: [(String, String)] = [("", "madeira-d3d12 (default)"), ("vkd3d", "vkd3d-proton on Vulkan")]
-    static let vulkanChoices: [(String, String)] = [("", "Automatic"), ("moltenvk", "MoltenVK"), ("kosmickrisp", "KosmicKrisp")]
+    static let d3d11Choices: [(String, String)] = [("", L("DXMT (default)")), ("dxvk", L("DXVK on Vulkan (experimental)"))]
+    static let d3d12Choices: [(String, String)] = [("", L("madeira-d3d12 (default)")), ("vkd3d", "vkd3d-proton on Vulkan")]
+    static let vulkanChoices: [(String, String)] = [("", L("Automatic")), ("moltenvk", "MoltenVK"), ("kosmickrisp", "KosmicKrisp")]
 
     static func bundled(_ path: String) -> Bool {
         FileManager.default.fileExists(atPath: Bundle.main.bundleURL.appendingPathComponent(path).path)
@@ -4696,70 +5243,70 @@ struct GraphicsSettings: View {
 
     private var d3d9Note: String {
         switch d3d9 {
-        case "": return "DXMT draws Direct3D 9 on Metal; 32-bit games run its frontend through the x86 translator."
-        case "native": return "32-bit games run DXMT's Direct3D 9 frontend as native ARM64 code; 64-bit games are unchanged."
-        case "wined3d": return "Experimental: 32- and 64-bit games use Wine's own Direct3D 9 on OpenGL, which needs the Zink OpenGL backend."
-        default: return "A value Madeira does not know; Direct3D 9 games use DXMT."
+        case "": return L("DXMT draws Direct3D 9 on Metal; 32-bit games run its frontend through the x86 translator.")
+        case "native": return L("32-bit games run DXMT's Direct3D 9 frontend as native ARM64 code; 64-bit games are unchanged.")
+        case "wined3d": return L("Experimental: 32- and 64-bit games use Wine's own Direct3D 9 on OpenGL, which needs the Zink OpenGL backend.")
+        default: return L("A value Madeira does not know; Direct3D 9 games use DXMT.")
         }
     }
     private var d3d11Note: String {
         switch d3d11 {
-        case "": return "DXMT draws Direct3D 10 and 11 on Metal."
-        case "dxvk": return "Experimental, 64-bit games only: Direct3D 10/11 and DXGI run through DXVK on Vulkan (MoltenVK unless a Vulkan driver is chosen below). Direct3D 12 then uses vkd3d-proton."
-        default: return "A value Madeira does not know; Direct3D 10/11 games use DXMT."
+        case "": return L("DXMT draws Direct3D 10 and 11 on Metal.")
+        case "dxvk": return L("Experimental, 64-bit games only: Direct3D 10/11 and DXGI run through DXVK on Vulkan (MoltenVK unless a Vulkan driver is chosen below). Direct3D 12 then uses vkd3d-proton.")
+        default: return L("A value Madeira does not know; Direct3D 10/11 games use DXMT.")
         }
     }
     private var d3d12Note: String {
         switch d3d12 {
-        case "" where d3d11 == "dxvk": return "With DXVK chosen above, Direct3D 12 games use vkd3d-proton on Vulkan: DXVK's DXGI shows only Vulkan devices."
-        case "": return "Direct3D 12 games run on madeira-d3d12, Madeira's own Direct3D 12 on Metal."
-        case "vkd3d": return "Experimental, 64-bit games only: Direct3D 12 runs through vkd3d-proton on Vulkan (MoltenVK unless a Vulkan driver is chosen below)."
-        default: return "A developer value; Direct3D 12 games run on madeira-d3d12."
+        case "" where d3d11 == "dxvk": return L("With DXVK chosen above, Direct3D 12 games use vkd3d-proton on Vulkan: DXVK's DXGI shows only Vulkan devices.")
+        case "": return L("Direct3D 12 games run on madeira-d3d12, Madeira's own Direct3D 12 on Metal.")
+        case "vkd3d": return L("Experimental, 64-bit games only: Direct3D 12 runs through vkd3d-proton on Vulkan (MoltenVK unless a Vulkan driver is chosen below).")
+        default: return L("A developer value; Direct3D 12 games run on madeira-d3d12.")
         }
     }
     private var vulkanNote: String {
         switch vulkan {
-        case "": return "Off, so games find no Vulkan, unless DXVK or vkd3d-proton is chosen above, which turns on MoltenVK."
-        case "moltenvk": return "64-bit games get Vulkan through MoltenVK, the driver the Zink OpenGL backend also uses."
-        case "kosmickrisp": return "Experimental: 64-bit games get Vulkan through Mesa's KosmicKrisp driver. Needs iOS 26 and an A14 chip or newer."
-        case "off", "0": return "Off: games find no Vulkan, and DXVK and vkd3d-proton are not used even when chosen above."
-        default: return "A Vulkan library named by path in madeira.cfg."
+        case "": return L("Off, so games find no Vulkan, unless DXVK or vkd3d-proton is chosen above, which turns on MoltenVK.")
+        case "moltenvk": return L("64-bit games get Vulkan through MoltenVK, the driver the Zink OpenGL backend also uses.")
+        case "kosmickrisp": return L("Experimental: 64-bit games get Vulkan through Mesa's KosmicKrisp driver. Needs iOS 26 and an A14 chip or newer.")
+        case "off", "0": return L("Off: games find no Vulkan, and DXVK and vkd3d-proton are not used even when chosen above.")
+        default: return L("A Vulkan library named by path in madeira.cfg.")
         }
     }
 
     var body: some View {
         Section {
-            choicePicker("Direct3D 9", key: "d3d9", value: $d3d9, choices: Self.d3d9Choices)
+            choicePicker(L("Direct3D 9"), key: "d3d9", value: $d3d9, choices: Self.d3d9Choices)
             note(d3d9Note)
             if d3d9 == "wined3d" {
                 let backend = (MadeiraConfig.get(Self.glBackendKey) ?? "").lowercased()
                 if !Self.hasZink || (!backend.isEmpty && backend != "zink") {
                     note(Self.hasZink ? "madeira.cfg sets gl-backend = \(backend); wined3d needs gl-backend = zink."
-                                      : "This build has no Zink OpenGL backend (gl/ folder), so wined3d cannot start.", warning: true)
+                                      : L("This build has no Zink OpenGL backend (gl/ folder), so wined3d cannot start."), warning: true)
                 }
             }
 
-            choicePicker("Direct3D 10/11", key: "d3d11", value: $d3d11,
+            choicePicker(L("Direct3D 10/11"), key: "d3d11", value: $d3d11,
                          choices: Self.hasDxvk || d3d11 == "dxvk" ? Self.d3d11Choices : Array(Self.d3d11Choices.prefix(1)))
             note(d3d11Note)
-            if !Self.hasDxvk { note("DXVK is not in this build.", warning: d3d11 == "dxvk") }
+            if !Self.hasDxvk { note(L("DXVK is not in this build."), warning: d3d11 == "dxvk") }
             if d3d11 == "dxvk" && !d3d12.isEmpty && d3d12 != "vkd3d" {
                 note("Direct3D 12 is set to \(d3d12); with DXVK only vkd3d-proton can show Direct3D 12 games.", warning: true)
             }
 
-            choicePicker("Direct3D 12", key: "d3d12", value: $d3d12,
+            choicePicker(L("Direct3D 12"), key: "d3d12", value: $d3d12,
                          choices: Self.hasVkd3d || d3d12 == "vkd3d" ? Self.d3d12Choices : Array(Self.d3d12Choices.prefix(1)))
             note(d3d12Note)
-            if !Self.hasVkd3d { note("vkd3d-proton is not in this build.", warning: d3d12 == "vkd3d") }
+            if !Self.hasVkd3d { note(L("vkd3d-proton is not in this build."), warning: d3d12 == "vkd3d") }
 
-            choicePicker("Vulkan driver", key: "vulkan", value: $vulkan,
+            choicePicker(L("Vulkan driver"), key: "vulkan", value: $vulkan,
                          choices: Self.hasKosmicKrisp || vulkan == "kosmickrisp" ? Self.vulkanChoices : Array(Self.vulkanChoices.prefix(2)),
-                         other: { $0 == "off" || $0 == "0" ? "Off" : "Custom library" })
+                         other: { $0 == "off" || $0 == "0" ? L("Off") : L("Custom library") })
             note(vulkanNote)
             if !Self.hasKosmicKrisp {
-                note("KosmicKrisp is not in this build (no gl/libvulkan_kosmickrisp.dylib).", warning: vulkan == "kosmickrisp")
+                note(L("KosmicKrisp is not in this build (no gl/libvulkan_kosmickrisp.dylib)."), warning: vulkan == "kosmickrisp")
             } else if !Self.metal4 {
-                note("This device has no Metal 4 GPU, so KosmicKrisp cannot start on it.", warning: vulkan == "kosmickrisp")
+                note(L("This device has no Metal 4 GPU, so KosmicKrisp cannot start on it."), warning: vulkan == "kosmickrisp")
             }
 
             Button("Reset to defaults") {
@@ -4781,6 +5328,63 @@ struct LibraryPillGlass: ViewModifier {
         if reduceTransparency { content.background(Color(uiColor: .secondarySystemBackground), in: Capsule()) }
         else if #available(iOS 26, *) { content.glassEffect(.regular.interactive(), in: Capsule()) }
         else { content.background(.regularMaterial, in: Capsule()) }
+    }
+}
+
+/// The in-game menu's panel: the system material, so the game shows through it
+/// blurred (owner, 2026-10-28: the solid panel). The solid panel as before with
+/// Reduce Transparency, or MADEIRA_MENU_BLUR=0.
+struct SessionMenuBackground: ViewModifier {
+    static let blur = MadeiraConfig.flag("MADEIRA_MENU_BLUR")   // 0: the in-game menu's solid panel, as before 2026-10-28
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 28)
+        if Self.blur && !reduceTransparency { content.background(.regularMaterial, in: shape) }
+        else { content.background(Color(uiColor: .secondarySystemBackground), in: shape) }
+    }
+}
+
+/// The performance overlay's look (OverlayStyle), under its figures in the in-game menu.
+struct OverlayStyleSettings: View {
+    @AppStorage(OverlayStyle.layoutKey) private var layout = "grid"
+    @AppStorage(OverlayStyle.scaleKey) private var scale = 1.0
+    @AppStorage(OverlayStyle.backgroundKey) private var background = "glass"
+    @AppStorage(OverlayStyle.opacityKey) private var opacity = 1.0
+    @AppStorage(OverlayStyle.labelsKey) private var labels = true
+    @AppStorage(OverlayStyle.coloursKey) private var colours = false
+    @AppStorage(OverlayStyle.refreshKey) private var refresh = 1.0
+    @AppStorage(OverlayStyle.graphSecondsKey) private var graphSeconds = 4.0
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Overlay style").font(.subheadline.weight(.semibold)).padding(.top, 4)
+            Picker("Layout", selection: $layout) {
+                ForEach(OverlayStyle.layouts, id: \.id) { Text($0.name).tag($0.id) }
+            }.pickerStyle(.segmented)
+            LabeledContent("Size") { Slider(value: $scale, in: 0.6...1.8, step: 0.05) }
+            LabeledContent("Opacity") { Slider(value: $opacity, in: 0.3...1) }
+            LabeledContent("Background") {
+                Picker("Background", selection: $background) {
+                    ForEach(OverlayStyle.backgrounds, id: \.id) { Text($0.name).tag($0.id) }
+                }.pickerStyle(.segmented).frame(maxWidth: 220)
+            }
+            Toggle("Labels", isOn: $labels)
+            Toggle("Colour by frame rate", isOn: $colours)
+            LabeledContent("Updates") {
+                Picker("Updates", selection: $refresh) {
+                    Text("0.5 s").tag(0.5); Text("1 s").tag(1.0); Text("2 s").tag(2.0)
+                }.pickerStyle(.segmented).frame(maxWidth: 220)
+            }
+            LabeledContent("Graph span") {
+                Picker("Graph span", selection: $graphSeconds) {
+                    Text("2 s").tag(2.0); Text("4 s").tag(4.0); Text("8 s").tag(8.0)
+                }.pickerStyle(.segmented).frame(maxWidth: 220)
+            }
+            Text("1% lows: the frame rate of the slowest 1% of frames in the last ten seconds; 1% highs, the fastest. The graph shows each frame's time, newest on the right; a stall is a plateau as long as the stall.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Reset overlay style") {
+                layout = "grid"; scale = 1; background = "glass"; opacity = 1; labels = true; colours = false; refresh = 1; graphSeconds = 4
+            }.font(.subheadline)
+        }.font(.subheadline)
     }
 }
 
@@ -4822,11 +5426,14 @@ struct LibraryFloatingItem: View {
                     Image(systemName: "line.3.horizontal").font(.title3.weight(.semibold)).frame(width: 48, height: 48)
                 }.buttonStyle(.plain).modifier(LibraryPillGlass())
                     .opacity(faded && drag == .zero && !model.menu ? 0.3 : 1)
-                    .accessibilityLabel("Game menu").accessibilityHint("Drag to move")
-            } else { LibraryMetrics().accessibilityHint("Drag to move") }
+                    .accessibilityLabel(L("Game menu")).accessibilityHint(L("Drag to move"))
+            } else { LibraryMetrics().accessibilityHint(L("Drag to move")) }
         }
-        .frame(maxWidth: isMenu ? 48 : max(48, min(390, viewport.width - insets.leading - insets.trailing - 16)))
-        .fixedSize(horizontal: false, vertical: true)
+        // The overlay's cells have fixed widths, so it takes its own size. A frame with a
+        // maxWidth takes all the width it is offered: the overlay measured the screen's width,
+        // and the drag could only centre it (the Column layout showed it most).
+        .frame(maxWidth: isMenu ? 48 : nil)
+        .fixedSize(horizontal: !isMenu, vertical: true)
         .background(GeometryReader { proxy in
             Color.clear.onAppear { measured = proxy.size }.onChange(of: proxy.size) { _, size in measured = size }
         })
@@ -4886,6 +5493,7 @@ struct LibraryHUD: View {
     @ObservedObject private var curtain = LaunchCurtain.shared
     /// The Session menu's Controller binds page (keyboard-and-mouse mode).
     @State private var bindsPage = false
+    @State private var assistPage = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         GeometryReader { geo in
@@ -4911,10 +5519,10 @@ struct LibraryHUD: View {
                 if !model.sessionMessage.isEmpty && !model.startingScreen { Text(model.sessionMessage).font(.caption).padding(10).background(.regularMaterial, in: Capsule()).frame(maxWidth: .infinity).padding(.top, Self.topInset(geo) + 12).allowsHitTesting(false) }
                 if !model.startingScreen { LibraryFloatingItem(isMenu: true, viewport: geo.size, insets: geo.safeAreaInsets) }
                 if model.menu {
-                    Color.black.opacity(0.5).ignoresSafeArea().onTapGesture { model.menu = false }.transition(.opacity)
-                    (bindsPage ? AnyView(bindsMenu) : AnyView(menu))
+                    Color.black.opacity(SessionMenuBackground.blur ? 0.3 : 0.5).ignoresSafeArea().onTapGesture { model.menu = false }.transition(.opacity)
+                    (bindsPage ? AnyView(bindsMenu) : assistPage ? AnyView(assistMenu) : AnyView(menu))
                         .frame(width: min(460, geo.size.width - 32), height: min(650, geo.size.height - geo.safeAreaInsets.top - geo.safeAreaInsets.bottom - 24))
-                        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 28))
+                        .modifier(SessionMenuBackground())
                         .clipShape(RoundedRectangle(cornerRadius: 28))
                         .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.15)))
                         .shadow(color: .black.opacity(0.6), radius: 30, y: 12)
@@ -4949,7 +5557,7 @@ struct LibraryHUD: View {
         .onAppear { model.saveCurrentProfile() }
         .onChange(of: model.menu) { _, open in
             LibraryController.shared.configure(enabled: model.enabled, ownsInput: open)
-            if !open { bindsPage = false }
+            if !open { bindsPage = false; assistPage = false }
             if !open { model.saveCurrentProfile() }
             if open { eco = madeira_get_eco() != 0; fenceMode = FPSOverlayFenceMode.current }
         }
@@ -5022,14 +5630,14 @@ struct LibraryHUD: View {
                 // holds the desktop back, Show desktop reveals it.
                 HStack(spacing: 14) {
                     if dockStart.failure != nil {
-                        launchGlyph("Close session", "stop.circle") { model.requestQuit() }
+                        launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
                     }
-                    launchGlyph(showLogs ? "Hide live log" : "Show live log", "text.alignleft", on: showLogs) {
+                    launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs) {
                         model.toggleLaunchLogs()
                     }
                     if dockStart.holding {
-                        launchGlyph("Show desktop", "macwindow") { dockStart.showDesktop(model) }
-                            .accessibilityHint("Shows the Windows desktop")
+                        launchGlyph(L("Show desktop"), "macwindow") { dockStart.showDesktop(model) }
+                            .accessibilityHint(L("Shows the Windows desktop"))
                     }
                 }.modifier(LaunchEntrance(visible: launchVisible, step: 3, still: curtained))
                 if model.launchSlow && !dockStart.holding {
@@ -5073,14 +5681,14 @@ struct LibraryHUD: View {
                 launchWideStatus.modifier(LaunchEntrance(visible: launchVisible, step: 2, rise: CGSize(width: 22, height: 0), still: curtained))
                 HStack(spacing: 12) {
                     if dockStart.failure != nil {
-                        launchGlyph("Close session", "stop.circle") { model.requestQuit() }
+                        launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
                     }
-                    launchGlyph(showLogs ? "Hide live log" : "Show live log", "text.alignleft", on: showLogs) {
+                    launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs) {
                         model.toggleLaunchLogs()
                     }
                     if dockStart.holding {
-                        launchGlyph("Show desktop", "macwindow") { dockStart.showDesktop(model) }
-                            .accessibilityHint("Shows the Windows desktop")
+                        launchGlyph(L("Show desktop"), "macwindow") { dockStart.showDesktop(model) }
+                            .accessibilityHint(L("Shows the Windows desktop"))
                     }
                     if model.launchSlow && !dockStart.holding {
                         Button("Show game view") { model.showGameView(reason: "button") }
@@ -5164,8 +5772,8 @@ struct LibraryHUD: View {
     }
     /// What the start is doing before the Dock reports (or for a game without Dock).
     private var launchIdleStatus: String {
-        if let entry = model.preparing { return model.startingJIT == entry.id ? "Enabling JIT…" : "Getting ready…" }
-        return model.launchSlow ? "Still starting…" : "Starting your game…"
+        if let entry = model.preparing { return model.startingJIT == entry.id ? L("Enabling JIT…") : L("Getting ready…") }
+        return model.launchSlow ? L("Still starting…") : L("Starting your game…")
     }
 
     /// What the Dock start is doing (DockStartStatus), read once a second.
@@ -5178,6 +5786,25 @@ struct LibraryHUD: View {
                                         installerProgress: progress, installsFinished: DockInstallers.finishedAt != nil,
                                         waited: Date().timeIntervalSince(hostDue),
                                         restartHint: DockInstallers.installsOnly ? DockInstallers.closingWords : nil)
+        }
+    }
+
+    /// Gyro aim and turbo, as a page of the Session menu; each change reaches the
+    /// pad at once (model.padAssist) and is saved to the game.
+    private var assistMenu: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button("Session", systemImage: "chevron.left") { assistPage = false }.buttonStyle(.borderless)
+                Spacer()
+                Text("Gyro aim & turbo").font(.headline)
+                Spacer()
+                Button("Reset") { model.padAssist = nil; model.saveCurrentProfile() }
+                    .buttonStyle(.borderless).disabled(model.padAssist == nil)
+                Button("Done") { model.menu = false }.buttonStyle(.bordered)
+            }.padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 8)
+            Form {
+                PadAssistPage(settings: Binding(get: { model.padAssist }, set: { model.padAssist = $0; model.saveCurrentProfile() }))
+            }.scrollContentBackground(.hidden)
         }
     }
 
@@ -5231,6 +5858,9 @@ struct LibraryHUD: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                if GamepadInput.enabled {
+                    Button("Gyro aim & turbo", systemImage: "gyroscope") { assistPage = true }
+                }
                 Button("Keyboard", systemImage: "keyboard") { model.menu = false; LibraryKeyboard.show() }
                 Divider()
                 FPSChoice(mode: Binding(get: { model.fpsMode }, set: { model.setFPS($0) }))
@@ -5255,11 +5885,12 @@ struct LibraryHUD: View {
                 Divider()
                 Toggle("Performance overlay", isOn: $model.performance)
                 if model.performance {
-                    ForEach(["FPS", "Frame time", "CPU", "GPU", "RAM", "JIT memory", "Battery", "Thermal"], id: \.self) { field in
+                    ForEach(OverlayStyle.fields, id: \.self) { field in
                         Toggle(field, isOn: Binding(get: { model.overlayFields.contains(field) }, set: { on in
                             model.overlayFields.removeAll { $0 == field }; if on { model.overlayFields.append(field) }
                         })).font(.subheadline)
                     }
+                    OverlayStyleSettings()
                 }
                 // The developer overlay's CAP and F pills (FPSOverlay), for library
                 // sessions: only with MADEIRA_SESSION_DIAGNOSTICS=1 (and not with
@@ -5338,15 +5969,145 @@ struct LibraryLiveLogs: View {
                 .frame(maxWidth: .infinity, minHeight: max(0, geo.size.height - 16), alignment: .topLeading)
             }.defaultScrollAnchor(.bottom).padding(8)
         }.background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 10)).foregroundStyle(.white)
-            .accessibilityLabel("Live diagnostic log")
+            .accessibilityLabel(L("Live diagnostic log"))
+    }
+}
+
+/// The performance overlay's look, the same in every game (owner, 2026-10-28): its
+/// layout, size, background, opacity, labels, colours and how often the figures
+/// change. Which figures it shows stays per game (LibraryEntry.overlayFields).
+enum OverlayStyle {
+    static let layoutKey = "madeiraOverlayLayout", scaleKey = "madeiraOverlayScale"
+    static let backgroundKey = "madeiraOverlayBackground", opacityKey = "madeiraOverlayOpacity"
+    static let labelsKey = "madeiraOverlayLabels", coloursKey = "madeiraOverlayColours"
+    static let refreshKey = "madeiraOverlayRefresh", graphSecondsKey = "madeiraOverlayGraphSeconds"
+    /// "grid": up to five cells a row (as first made); "row": one long row; "column": one figure a line.
+    static let layouts: [(id: String, name: String)] = [("grid", "Grid"), ("row", "One row"), ("column", "Column")]
+    static let backgrounds: [(id: String, name: String)] = [("glass", "Glass"), ("dark", "Dark"), ("clear", "None")]
+    /// The figures the overlay can show, in the order of the menu's switches.
+    static let fields = ["FPS", "Frame time", "1% lows", "0.1% lows", "Frame graph", "CPU", "GPU", "RAM", "JIT memory", "Swap & donor", "Battery", "Thermal"]
+}
+
+/// Frame times from the present path (madeira_frame_times_us, Winios.m) and the
+/// figures made from them: the 1% low is the frame rate of the slowest 1% of
+/// frames (their mean frame time), the 1% high that of the fastest 1%.
+enum FrameTimes {
+    static func read(windowMs: UInt32, max: Int = 2048) -> (intervals: [Double], sinceLast: Double) {
+        var buffer = [UInt32](repeating: 0, count: max)
+        var since: UInt32 = 0
+        let n = Int(madeira_frame_times_us(&buffer, Int32(max), windowMs, &since))
+        return (buffer.prefix(n).map { Double($0) / 1000 }, Double(since) / 1000)
+    }
+    /// (1% low, 1% high) in frames a second, nil without enough frames.
+    static func onePercent(_ ms: [Double]) -> (low: Double, high: Double)? {
+        guard ms.count >= 10 else { return nil }
+        let sorted = ms.sorted(), k = max(1, sorted.count / 100)
+        let slow = sorted.suffix(k).reduce(0, +) / Double(k), fast = sorted.prefix(k).reduce(0, +) / Double(k)
+        guard slow > 0, fast > 0 else { return nil }
+        return (1000 / slow, 1000 / fast)
+    }
+    /// The 0.1% low in frames a second: the slowest 0.1% of frames (at least the
+    /// slowest one), nil without enough frames.
+    static func pointOnePercentLow(_ ms: [Double]) -> Double? {
+        guard ms.count >= 10 else { return nil }
+        let k = max(1, ms.count / 1000), slow = ms.sorted().suffix(k).reduce(0, +) / Double(k)
+        return slow > 0 ? 1000 / slow : nil
+    }
+    /// The frame time to show: the mean of the frames presented in the last
+    /// `windowMs`, or the time since the last present when that is longer (a stall
+    /// still going on). nil when nothing has presented.
+    static func current(windowMs: UInt32) -> Double? {
+        let (ms, since) = read(windowMs: windowMs, max: 512)
+        let mean = ms.isEmpty ? 0 : ms.reduce(0, +) / Double(ms.count)
+        let value = max(mean, since > mean ? since : 0)
+        return value > 0 ? value : nil
+    }
+}
+
+/// The frame-time graph: each frame a step as wide as it lasted and as high as its
+/// time, newest on the right, so a stall is a plateau as long as the stall; the
+/// frame still being made grows at the right edge. Drawn ten times a second.
+struct FrameTimeGraph: View {
+    let width: CGFloat
+    let height: CGFloat
+    let scale: CGFloat
+    let seconds: Double
+    let colours: Bool
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+            let (ms, since) = FrameTimes.read(windowMs: UInt32(seconds * 1000), max: 1024)
+            let sorted = ms.sorted()
+            let median = sorted.isEmpty ? 16.7 : sorted[sorted.count / 2]
+            let p99 = sorted.isEmpty ? 16.7 : sorted[min(sorted.count - 1, sorted.count * 99 / 100)]
+            // The frame still being made, once it is clearly late.
+            let pending = since > max(50, median * 2) ? since : 0
+            let top = [33.3, 50, 66.7, 100, 200, 500, 1000, 2000, 5000].first(where: { $0 >= max(p99, pending) * 1.15 }) ?? 5000
+            ZStack(alignment: .topTrailing) {
+                Canvas { context, size in
+                    let w = size.width, h = size.height
+                    func y(_ v: Double) -> CGFloat { h - CGFloat(min(v, top) / top) * (h - 1) }
+                    for guide in [16.7, 33.3] where guide < top {
+                        var line = Path(); line.move(to: CGPoint(x: 0, y: y(guide))); line.addLine(to: CGPoint(x: w, y: y(guide)))
+                        context.stroke(line, with: .color(.primary.opacity(0.18)), style: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                    }
+                    // Right edge = now; walk back from the newest frame.
+                    var steps: [(x0: CGFloat, x1: CGFloat, v: Double)] = []
+                    var end = since
+                    if pending > 0 { steps.append((w - CGFloat(pending / 1000 / seconds) * w, w, pending)) }
+                    for v in ms.reversed() {
+                        let x1 = w - CGFloat(end / 1000 / seconds) * w, x0 = w - CGFloat((end + v) / 1000 / seconds) * w
+                        if x1 < 0 { break }
+                        steps.append((max(0, x0), x1, v)); end += v
+                    }
+                    guard !steps.isEmpty else { return }
+                    var outline = Path(), fill = Path()
+                    let ordered = steps.reversed()
+                    fill.move(to: CGPoint(x: ordered.first!.x0, y: h))
+                    for (i, s) in ordered.enumerated() {
+                        if i == 0 { outline.move(to: CGPoint(x: s.x0, y: y(s.v))) } else { outline.addLine(to: CGPoint(x: s.x0, y: y(s.v))) }
+                        outline.addLine(to: CGPoint(x: s.x1, y: y(s.v)))
+                        fill.addLine(to: CGPoint(x: s.x0, y: y(s.v))); fill.addLine(to: CGPoint(x: s.x1, y: y(s.v)))
+                    }
+                    fill.addLine(to: CGPoint(x: ordered.last!.x1, y: h)); fill.closeSubpath()
+                    context.fill(fill, with: .color(.primary.opacity(0.12)))
+                    context.stroke(outline, with: .color(.primary.opacity(0.85)), lineWidth: max(1, scale))
+                    // Spikes: frames over twice the median, marked in orange (red over 100 ms) with colours on.
+                    if colours {
+                        for s in steps where s.v > max(median * 2, 25) {
+                            var spike = Path(); spike.move(to: CGPoint(x: s.x0, y: y(s.v))); spike.addLine(to: CGPoint(x: s.x1, y: y(s.v)))
+                            spike.move(to: CGPoint(x: s.x0, y: y(s.v))); spike.addLine(to: CGPoint(x: s.x0, y: h))
+                            context.stroke(spike, with: .color(s.v > 100 ? .red : .orange), lineWidth: max(1.5, scale * 1.5))
+                        }
+                    }
+                }
+                Text(top >= 1000 ? String(format: "%.0f s", top / 1000) : String(format: "%.0f ms", top))
+                    .font(.system(size: 8 * scale, weight: .medium, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.secondary).padding(.trailing, 2)
+            }
+            .frame(width: width, height: height)
+        }
+        .accessibilityHidden(true)
     }
 }
 
 struct LibraryMetrics: View {
     @ObservedObject private var model = LibraryModel.shared
+    @AppStorage(OverlayStyle.layoutKey) private var layout = "grid"
+    @AppStorage(OverlayStyle.scaleKey) private var scale = 1.0
+    @AppStorage(OverlayStyle.backgroundKey) private var background = "glass"
+    @AppStorage(OverlayStyle.opacityKey) private var opacity = 1.0
+    @AppStorage(OverlayStyle.labelsKey) private var labels = true
+    @AppStorage(OverlayStyle.coloursKey) private var colours = false
+    @AppStorage(OverlayStyle.refreshKey) private var refresh = 1.0
+    @AppStorage(OverlayStyle.graphSecondsKey) private var graphSeconds = 4.0
     @State private var lastCount: UInt64 = 0
     @State private var lastTime = Date()
+    @State private var tick = 0
     @State private var fps = 0.0
+    @State private var onePercent: (low: Double, high: Double)?
+    @State private var pointOneLow: Double?
+    /// Measured from the present path, like the graph (1000 / FPS hid the slow frames).
+    @State private var frameMs: Double?
     @State private var memory = 0
     @State private var battery = -1
     /// iOS lowers clocks from .serious on, so a frame rate that sags after a few
@@ -5358,21 +6119,184 @@ struct LibraryMetrics: View {
     @State private var lastGPUBuffers: UInt64 = 0
     @State private var gpu = -1.0
     @State private var gpuFrameMs = 0.0
-    private let ticks = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    /// ml2021: the swap tier's figures (madeira_swap_overlay_stats): MB backed by the
+    /// swap file, MB served from the donor pool, the pool's registered size, and the
+    /// takes its free-RAM guard refused.
+    @State private var swapFileMB = 0
+    @State private var donatedMB = 0
+    @State private var donorPoolMB = 0
+    @State private var donorGuarded = 0
+    /// Half-second ticks; the figures change every `refresh` seconds (0.5, 1 or 2).
+    private let ticks = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+    /// ml2021: one cell per figure. A fixed width per cell (the widest value it can show)
+    /// keeps the pill from shifting as digits change; monospaced digits keep the value
+    /// still within the cell. Label above, value below, hairlines between cells, the
+    /// system material behind: no gradients, no custom colours beyond the thermal dot
+    /// (and, with Colours on, the frame-rate figures).
+    struct Cell: Identifiable {
+        let id: String
+        let label: String
+        let value: String
+        let width: CGFloat
+        var dot: Color? = nil
+        var tint: Color? = nil
+    }
+    private var s: CGFloat { CGFloat(min(max(scale, 0.5), 2)) }
+    private func speed(_ rate: Double) -> Color? {
+        guard colours, rate > 0 else { return nil }
+        return rate >= 45 ? .green : rate >= 25 ? .yellow : .red
+    }
+    private var cells: [Cell] {
+        var result: [Cell] = []
+        if model.overlayFields.contains("FPS") {
+            result.append(Cell(id: "fps", label: "FPS", value: String(format: "%.0f", fps), width: 44, tint: speed(fps)))
+        }
+        if model.overlayFields.contains("Frame time") {
+            result.append(Cell(id: "ms", label: "MS", value: frameMs.map { String(format: $0 >= 100 ? "%.0f" : "%.1f", $0) } ?? "–", width: 52))
+        }
+        if model.overlayFields.contains("1% lows") {
+            result.append(Cell(id: "low", label: "1% LOW", value: onePercent.map { String(format: "%.0f", $0.low) } ?? "–", width: 52,
+                               tint: onePercent.flatMap { speed($0.low) }))
+            result.append(Cell(id: "high", label: "1% HIGH", value: onePercent.map { String(format: "%.0f", $0.high) } ?? "–", width: 54))
+        }
+        if model.overlayFields.contains("0.1% lows") {
+            result.append(Cell(id: "low01", label: "0.1% LOW", value: pointOneLow.map { String(format: "%.0f", $0) } ?? "–", width: 60,
+                               tint: pointOneLow.flatMap { speed($0) }))
+        }
+        if model.overlayFields.contains("CPU") {
+            result.append(Cell(id: "cpu", label: "CPU", value: cpu.map { String(format: "%.0f%%", $0.total) } ?? "–", width: 50))
+            result.append(Cell(id: "top", label: "TOP", value: cpu.map { String(format: "%.0f%%", $0.top) } ?? "–", width: 50))
+        }
+        if model.overlayFields.contains("GPU") {
+            result.append(Cell(id: "gpu", label: "GPU", value: gpu < 0 ? "–" : String(format: "%.0f%%", gpu), width: 50))
+            result.append(Cell(id: "gpums", label: "GPU MS", value: gpu < 0 || gpuFrameMs <= 0 ? "–" : String(format: "%.1f", gpuFrameMs), width: 56))
+        }
+        if model.overlayFields.contains("RAM") { result.append(Cell(id: "ram", label: "MB", value: "\(memory)", width: 54)) }
+        if model.overlayFields.contains("Swap & donor") {
+            if donorPoolMB > 0 { result.append(Cell(id: "donor", label: "DONOR", value: "\(donatedMB)", width: 54)) }
+            result.append(Cell(id: "swap", label: "SWAP", value: "\(swapFileMB)", width: 54))
+        }
+        if model.overlayFields.contains("Battery"), battery >= 0 { result.append(Cell(id: "bat", label: "BAT", value: "\(battery)%", width: 50)) }
+        if model.overlayFields.contains("Thermal") {
+            let (word, dot): (String, Color) = {
+                switch thermal {
+                case .nominal: return ("Cool", .green)
+                case .fair: return ("Warm", .yellow)
+                case .serious: return ("Hot", .orange)
+                case .critical: return ("Critical", .red)
+                @unknown default: return ("–", .gray)
+                }
+            }()
+            result.append(Cell(id: "temp", label: "TEMP", value: word, width: 62, dot: dot))
+        }
+        return result
+    }
+    private func value(_ c: Cell) -> some View {
+        HStack(spacing: 4 * s) {
+            if let dot = c.dot { Circle().fill(dot).frame(width: 6 * s, height: 6 * s) }
+            Text(c.value).font(.system(size: 13 * s, weight: .semibold, design: .rounded).monospacedDigit())
+                .foregroundStyle(c.tint ?? .primary)
+        }
+    }
+    private func label(_ c: Cell) -> some View {
+        Text(c.label).font(.system(size: 9 * s, weight: .medium, design: .rounded)).tracking(0.6 * s).foregroundStyle(.secondary)
+    }
+    private func cell(_ c: Cell) -> some View {
+        VStack(spacing: 1 * s) {
+            if labels { label(c) }
+            value(c)
+        }
+        .frame(width: c.width * s)
+    }
+    private func row(_ cells: [Cell]) -> some View {
+        HStack(spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.element.id) { index, c in
+                if index > 0 { Rectangle().fill(.primary.opacity(0.12)).frame(width: 1, height: (labels ? 20 : 14) * s) }
+                cell(c)
+            }
+        }
+    }
+    /// The width a row of these cells takes (cells and hairlines).
+    private func width(_ cells: [Cell]) -> CGFloat {
+        cells.reduce(0) { $0 + $1.width * s } + CGFloat(max(0, cells.count - 1))
+    }
+    private func graph(width: CGFloat, height: CGFloat) -> some View {
+        FrameTimeGraph(width: width, height: height, scale: s, seconds: min(max(graphSeconds, 1), 10), colours: colours)
+    }
+    @ViewBuilder private var content: some View {
+        let all = cells
+        let showGraph = model.overlayFields.contains("Frame graph")
+        switch layout {
+        case "row":
+            HStack(spacing: 0) {
+                row(all)
+                if showGraph {
+                    if !all.isEmpty { Rectangle().fill(.primary.opacity(0.12)).frame(width: 1, height: (labels ? 20 : 14) * s).padding(.trailing, 4 * s) }
+                    graph(width: 120 * s, height: (labels ? 26 : 18) * s)
+                }
+            }
+        case "column":
+            VStack(alignment: .leading, spacing: 3 * s) {
+                ForEach(all) { c in
+                    HStack(spacing: 8 * s) {
+                        if labels { label(c) }
+                        Spacer(minLength: 0)
+                        value(c)
+                    }
+                    .frame(width: 112 * s)
+                }
+                if showGraph { graph(width: 112 * s, height: 34 * s) }
+            }
+            .padding(.horizontal, 2 * s)
+        default:
+            // Up to five cells on a row; more wrap onto a second row so the pill stays under the
+            // viewport's width instead of truncating.
+            let split = all.count > 5 ? (all.count + 1) / 2 : all.count
+            let first = Array(all.prefix(split)), second = Array(all.suffix(from: split))
+            VStack(spacing: 6 * s) {
+                if !first.isEmpty { row(first) }
+                if !second.isEmpty { row(second) }
+                if showGraph { graph(width: max(width(first), width(second), 150 * s), height: 34 * s) }
+            }
+        }
+    }
+    @ViewBuilder private func backdrop<V: View>(_ v: V) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12 * s, style: .continuous)
+        switch background {
+        case "dark":
+            v.background(Color.black.opacity(0.55), in: shape)
+                .overlay(shape.strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+                .environment(\.colorScheme, .dark)
+        case "clear":
+            v.shadow(color: .black.opacity(0.9), radius: 1.5).environment(\.colorScheme, .dark)
+        default:
+            v.background(.ultraThinMaterial, in: shape)
+                .overlay(shape.strokeBorder(.primary.opacity(0.1), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+        }
+    }
     var body: some View {
-        Text(parts.joined(separator: "  ·  "))
-            .font(.caption.monospacedDigit().weight(.medium)).padding(.horizontal, 12).padding(.vertical, 8)
-            .background(.black.opacity(0.8), in: Capsule()).foregroundStyle(.white)
+        backdrop(content.padding(.horizontal, 6 * s).padding(.vertical, 6 * s))
+        .opacity(min(max(opacity, 0.2), 1))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(parts.joined(separator: ", "))
             .onAppear {
-                lastCount = madeira_frame_count(); lastTime = Date(); UIDevice.current.isBatteryMonitoringEnabled = true
+                lastCount = madeira_shown_frame_count(); lastTime = Date(); UIDevice.current.isBatteryMonitoringEnabled = true
                 applyGPUMeter()
             }
             .onDisappear { UIDevice.current.isBatteryMonitoringEnabled = false; madeira_gpu_meter_enable(0) }
             .onChange(of: model.overlayFields) { _, _ in applyGPUMeter() }
             .onReceive(ticks) { now in
-                let count = madeira_frame_count(); let dt = now.timeIntervalSince(lastTime)
+                tick += 1
+                guard tick % max(1, Int((refresh / 0.5).rounded())) == 0 else { return }
+                let count = madeira_shown_frame_count(); let dt = now.timeIntervalSince(lastTime)
                 let frames = count >= lastCount ? count - lastCount : 0
                 fps = Double(frames) / max(0.001, dt); lastCount = count; lastTime = now
+                // Over the last ten seconds, so a stall stays in the figure for a while.
+                if model.overlayFields.contains("1% lows") { onePercent = FrameTimes.onePercent(FrameTimes.read(windowMs: 10_000).intervals) }
+                // 0.1% needs more frames: thirty seconds (the ring holds 2048).
+                if model.overlayFields.contains("0.1% lows") { pointOneLow = FrameTimes.pointOnePercentLow(FrameTimes.read(windowMs: 30_000).intervals) }
+                if model.overlayFields.contains("Frame time") { frameMs = FrameTimes.current(windowMs: UInt32(max(0.5, refresh) * 1000)) }
                 var info = task_vm_info_data_t(); var size = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
                 let result = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &size) } }
                 if result == KERN_SUCCESS { memory = Int(info.phys_footprint / 1048576) }
@@ -5383,6 +6307,11 @@ struct LibraryMetrics: View {
                     thermal = state
                 }
                 if model.overlayFields.contains("CPU") { cpu = cpuMeter.sample() }
+                if model.overlayFields.contains("Swap & donor") {
+                    var file: UInt64 = 0, donated: UInt64 = 0, pool: UInt64 = 0, guarded: UInt64 = 0
+                    madeira_swap_overlay_stats(&file, &donated, &pool, &guarded)
+                    swapFileMB = Int(file); donatedMB = Int(donated); donorPoolMB = Int(pool); donorGuarded = Int(guarded)
+                }
                 if model.overlayFields.contains("GPU") {
                     let busy = madeira_gpu_meter_busy_seconds(), buffers = madeira_gpu_meter_cmdbufs()
                     let used = max(0, busy - lastGPUBusy)
@@ -5400,7 +6329,11 @@ struct LibraryMetrics: View {
     private var parts: [String] {
         var result: [String] = []
         if model.overlayFields.contains("FPS") { result.append(String(format: "%.0f FPS", fps)) }
-        if model.overlayFields.contains("Frame time") { result.append(fps > 0 ? String(format: "%.1f ms avg", 1000 / fps) : "— ms") }
+        if model.overlayFields.contains("Frame time") { result.append(frameMs.map { String(format: "%.1f ms", $0) } ?? "— ms") }
+        if model.overlayFields.contains("1% lows") {
+            result.append(onePercent.map { String(format: "1%% low %.0f, 1%% high %.0f FPS", $0.low, $0.high) } ?? "1% lows —")
+        }
+        if model.overlayFields.contains("0.1% lows") { result.append(pointOneLow.map { String(format: "0.1%% low %.0f FPS", $0) } ?? "0.1% low —") }
         if model.overlayFields.contains("CPU") {
             result.append(cpu.map { String(format: "CPU %.0f%% (top %.0f%%)", $0.total, $0.top) } ?? "CPU —")
         }
@@ -5412,6 +6345,15 @@ struct LibraryMetrics: View {
         if model.overlayFields.contains("RAM") { result.append("\(memory) MB") }
         // The memory games' code runs from; "FULL" once a DLL did not fit (JITPoolMeter).
         if model.overlayFields.contains("JIT memory") { result.append(JITPoolMeter.text(JITPoolMeter.current) ?? "JIT —") }
+        if model.overlayFields.contains("Swap & donor") {
+            // RAM above is the app's own footprint; donated memory is billed to the
+            // extension's ledger, so it is shown beside it rather than added to it.
+            if donorPoolMB > 0 {
+                result.append(donorGuarded > 0 ? "Donated \(donatedMB)/\(donorPoolMB) MB (\(donorGuarded) guarded)"
+                                               : "Donated \(donatedMB)/\(donorPoolMB) MB")
+            }
+            result.append("Swap \(swapFileMB) MB")
+        }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append("\(battery)%") }
         if model.overlayFields.contains("Thermal") {
             switch thermal {

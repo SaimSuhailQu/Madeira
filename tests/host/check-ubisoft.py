@@ -71,7 +71,7 @@ require('"madeira.ubisoft.tokens"' in api, "Keychain service is madeira.ubisoft.
 require("MADEIRA_UBISOFT" in (app / "UbisoftLibrary.swift").read_text(), "kill switch MADEIRA_UBISOFT present")
 require("UbisoftGamesSection" in library, "library shows the Ubisoft section")
 require("UbisoftSettingsSection" in library, "Settings shows the Ubisoft section")
-require("case allSettings, steamSignIn, epicSignIn, ubisoftSignIn, dock" in library,
+require("case allSettings, steamSignIn, epicSignIn, ubisoftSignIn, eaSignIn, dock" in library,
         "SettingsSheet has the ubisoftSignIn case")
 require("UbisoftSignInView()" in library and "UbisoftSignInView()" in content,
         "both settings sheets present the Ubisoft sign-in")
