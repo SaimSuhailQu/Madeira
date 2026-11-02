@@ -150,6 +150,7 @@ struct SettingsPageView: View {
                 case .allSettings: AllSettingsView()
                 case .steamSignIn: SteamSignInView()
                 case .epicSignIn: EpicSignInView()
+                case .ubisoftSignIn: UbisoftSignInView()
                 case .eaSignIn: EASignInView()
                 case .dock: MadeiraDockView(start: startDock)
                 }
