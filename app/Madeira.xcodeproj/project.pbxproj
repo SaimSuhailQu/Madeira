@@ -24,6 +24,17 @@
 		A1007B30 /* SwiftItch/itch_7z.c in Sources */ = {isa = PBXBuildFile; fileRef = A2007B30 /* itch_7z.c */; };
 		A1007B04 /* ItchLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B04 /* ItchLibrary.swift */; };
 		A1007B05 /* ItchGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B05 /* ItchGames.swift */; };
+		A1006A01 /* GOGLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A01 /* GOGLibrary.swift */; };
+		A1006A02 /* GOGGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A02 /* GOGGames.swift */; };
+		A1006A03 /* SwiftGOG/GOGAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A03 /* GOGAPI.swift */; };
+		A1006A04 /* SwiftGOG/GOGDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A04 /* GOGDownloader.swift */; };
+		A1006A05 /* SwiftGOG/GOGSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A05 /* GOGSetup.swift */; };
+		A1006A0B /* SwiftGOG/GOGInstallScript.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A0B /* GOGInstallScript.swift */; };
+		A1006A06 /* SwiftGOG/GOGGalaxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A06 /* GOGGalaxy.swift */; };
+		A1006A07 /* SwiftGOG/Galaxy/GalaxyWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A07 /* GalaxyWire.swift */; };
+		A1006A08 /* SwiftGOG/Galaxy/GalaxyService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A08 /* GalaxyService.swift */; };
+		A1006A09 /* SwiftGOG/Galaxy/GalaxyListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A09 /* GalaxyListener.swift */; };
+		A1006A0A /* SwiftGOG/Galaxy/GalaxySupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A0A /* GalaxySupport.swift */; };
 		A1006B01 /* EALibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B01 /* EALibrary.swift */; };
 		A1006B02 /* EAGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B02 /* EAGames.swift */; };
 		A1006B03 /* SwiftEA/EAAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B03 /* EAAPI.swift */; };
@@ -296,6 +307,17 @@
 		A2007B31 /* itch_7z.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftItch/itch_7z.h"; sourceTree = "<group>"; };
 		A2007B04 /* ItchLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchLibrary.swift"; sourceTree = "<group>"; };
 		A2007B05 /* ItchGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchGames.swift"; sourceTree = "<group>"; };
+		A2006A01 /* GOGLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GOGLibrary.swift"; sourceTree = "<group>"; };
+		A2006A02 /* GOGGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GOGGames.swift"; sourceTree = "<group>"; };
+		A2006A03 /* GOGAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGAPI.swift"; sourceTree = "<group>"; };
+		A2006A04 /* GOGDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGDownloader.swift"; sourceTree = "<group>"; };
+		A2006A05 /* GOGSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGSetup.swift"; sourceTree = "<group>"; };
+		A2006A0B /* GOGInstallScript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGInstallScript.swift"; sourceTree = "<group>"; };
+		A2006A06 /* GOGGalaxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGGalaxy.swift"; sourceTree = "<group>"; };
+		A2006A07 /* GalaxyWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/Galaxy/GalaxyWire.swift"; sourceTree = "<group>"; };
+		A2006A08 /* GalaxyService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/Galaxy/GalaxyService.swift"; sourceTree = "<group>"; };
+		A2006A09 /* GalaxyListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/Galaxy/GalaxyListener.swift"; sourceTree = "<group>"; };
+		A2006A0A /* GalaxySupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/Galaxy/GalaxySupport.swift"; sourceTree = "<group>"; };
 		A2006B01 /* EALibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EALibrary.swift"; sourceTree = "<group>"; };
 		A2006B02 /* EAGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EAGames.swift"; sourceTree = "<group>"; };
 		A2006B03 /* EAAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EAAPI.swift"; sourceTree = "<group>"; };
@@ -613,6 +635,17 @@
 				A2007B31 /* itch_7z.h */,
 				A2007B04 /* ItchLibrary.swift */,
 				A2007B05 /* ItchGames.swift */,
+				A2006A01 /* GOGLibrary.swift */,
+				A2006A02 /* GOGGames.swift */,
+				A2006A03 /* GOGAPI.swift */,
+				A2006A04 /* GOGDownloader.swift */,
+				A2006A05 /* GOGSetup.swift */,
+				A2006A0B /* GOGInstallScript.swift */,
+				A2006A06 /* GOGGalaxy.swift */,
+				A2006A07 /* GalaxyWire.swift */,
+				A2006A08 /* GalaxyService.swift */,
+				A2006A09 /* GalaxyListener.swift */,
+				A2006A0A /* GalaxySupport.swift */,
 				A2006B01 /* EALibrary.swift */,
 				A2006B02 /* EAGames.swift */,
 				A2006B03 /* EAAPI.swift */,
@@ -1075,6 +1108,17 @@
 				A1007B30 /* SwiftItch/itch_7z.c in Sources */,
 				A1007B04 /* ItchLibrary.swift in Sources */,
 				A1007B05 /* ItchGames.swift in Sources */,
+				A1006A01 /* GOGLibrary.swift in Sources */,
+				A1006A02 /* GOGGames.swift in Sources */,
+				A1006A03 /* SwiftGOG/GOGAPI.swift in Sources */,
+				A1006A04 /* SwiftGOG/GOGDownloader.swift in Sources */,
+				A1006A05 /* SwiftGOG/GOGSetup.swift in Sources */,
+				A1006A0B /* SwiftGOG/GOGInstallScript.swift in Sources */,
+				A1006A06 /* SwiftGOG/GOGGalaxy.swift in Sources */,
+				A1006A07 /* SwiftGOG/Galaxy/GalaxyWire.swift in Sources */,
+				A1006A08 /* SwiftGOG/Galaxy/GalaxyService.swift in Sources */,
+				A1006A09 /* SwiftGOG/Galaxy/GalaxyListener.swift in Sources */,
+				A1006A0A /* SwiftGOG/Galaxy/GalaxySupport.swift in Sources */,
 				A1006B01 /* EALibrary.swift in Sources */,
 				A1006B02 /* EAGames.swift in Sources */,
 				A1006B03 /* SwiftEA/EAAPI.swift in Sources */,
@@ -1322,7 +1366,7 @@
 				CODE_SIGN_ENTITLEMENTS = Madeira/Madeira.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = V8NU3FX3TL;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
@@ -1354,7 +1398,7 @@
 					"$(SRCROOT)/../FEX/build-ios/External/SoftFloat-3e",
 					"$(SRCROOT)/Madeira",
 				);
-				MARKETING_VERSION = 0.1.3;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(MADEIRA_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1374,7 +1418,7 @@
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = ("$(inherited)", "$(MADEIRA_VULKAN_LDFLAGS)");
 				CODE_SIGN_ENTITLEMENTS = Madeira/Madeira.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = V8NU3FX3TL;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
@@ -1406,7 +1450,7 @@
 					"$(SRCROOT)/../FEX/build-ios/External/SoftFloat-3e",
 					"$(SRCROOT)/Madeira",
 				);
-				MARKETING_VERSION = 0.1.3;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(MADEIRA_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1424,7 +1468,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = V8NU3FX3TL;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/Frameworks/StikJIT.xcframework/ios-arm64";
 				GENERATE_INFOPLIST_FILE = NO;
@@ -1434,7 +1478,7 @@
 					"$(inherited)",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.3;
+				MARKETING_VERSION = 0.2.0;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"$(inherited)",
 					"-framework",
@@ -1455,7 +1499,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = V8NU3FX3TL;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/Frameworks/StikJIT.xcframework/ios-arm64";
 				GENERATE_INFOPLIST_FILE = NO;
@@ -1465,7 +1509,7 @@
 					"$(inherited)",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.3;
+				MARKETING_VERSION = 0.2.0;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"$(inherited)",
 					"-framework",
