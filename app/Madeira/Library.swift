@@ -3005,6 +3005,91 @@ struct LibrarySectionHeader<Trailing: View>: View {
     }
 }
 
+/// The library's store tabs: with Group by Platform, a segmented control at the top of the
+/// page shows one store's section at a time (Steam, the games you added, GOG, itch.io, Epic
+/// Games, EA app) or All of them. Only the sections the page would show get a tab, and with
+/// fewer than two there are none. env.MADEIRA_LIBRARY_TABS = 0: no tabs, every section on one page.
+enum LibraryStoreTab: String, CaseIterable, Identifiable {
+    case all, steam, other, gog, itch, epic, ea
+    var id: String { rawValue }
+    static let key = "madeiraLibraryStoreTab"
+    static var enabled: Bool { MadeiraConfig.flag("MADEIRA_LIBRARY_TABS") }
+
+    /// Short, so every segment fits across a phone.
+    var title: String {
+        switch self {
+        case .all: return L("All")
+        case .steam: return "Steam"
+        case .other: return L("Other")
+        case .gog: return "GOG"
+        case .itch: return "itch.io"
+        case .epic: return "Epic"
+        case .ea: return "EA"
+        }
+    }
+
+    /// All, then a tab for each section the page shows; none with fewer than two sections.
+    /// `steam` is whether the page has a Steam section.
+    @MainActor static func available(steam: Bool) -> [LibraryStoreTab] {
+        guard enabled else { return [] }
+        var tabs: [LibraryStoreTab] = []
+        if steam { tabs.append(.steam) }
+        tabs.append(.other)
+        if GOGLibrary.enabled { tabs.append(.gog) }
+        if ItchLibrary.enabled { tabs.append(.itch) }
+        if EpicLibrary.enabled { tabs.append(.epic) }
+        if EALibrary.enabled { tabs.append(.ea) }
+        return tabs.count < 2 ? [] : [.all] + tabs
+    }
+
+    /// The stored tab, or All when it is not offered (its store was turned off).
+    static func current(_ stored: String, in tabs: [LibraryStoreTab]) -> LibraryStoreTab {
+        guard let tab = LibraryStoreTab(rawValue: stored), tabs.contains(tab) else { return .all }
+        return tab
+    }
+
+    func shows(_ section: LibraryStoreTab) -> Bool { self == .all || self == section }
+}
+
+/// The store tabs' control: the system segmented control, or, when its segments do not fit
+/// across, a row of capsules that scrolls sideways.
+struct LibraryStoreTabBar: View {
+    let tabs: [LibraryStoreTab]
+    @Binding var selection: String
+
+    private var picked: Binding<LibraryStoreTab> {
+        Binding(get: { LibraryStoreTab.current(selection, in: tabs) },
+                set: { tab in withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { selection = tab.rawValue } })
+    }
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            Picker("Store", selection: picked) {
+                ForEach(tabs) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .frame(maxWidth: .infinity)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(tabs) { tab in
+                        let on = picked.wrappedValue == tab
+                        Button { picked.wrappedValue = tab } label: {
+                            Text(tab.title).font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 14).padding(.vertical, 7)
+                                .foregroundStyle(on ? Color.white : Color.primary)
+                                .background(Capsule().fill(on ? Color.accentColor : Color(uiColor: .tertiarySystemFill)))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(on ? .isSelected : [])
+                    }
+                }
+            }
+        }
+        .accessibilityLabel("Store")
+    }
+}
+
 /// A section's cards or rows in the library's layout ("cards", "compact",
 /// "list" or "compactList"): every section of the library page uses it.
 struct LibraryCells<Item: Identifiable, Cell: View>: View {
@@ -3310,6 +3395,12 @@ struct LibraryView: View {
     @AppStorage("madeiraLibraryCollapsedGroups") private var collapsedGroups = ""
     // Collapsed state of the Other games section (MADEIRA_LIBRARY_COLLAPSE=0: no collapsing).
     @AppStorage("madeiraLibraryHideOthers") private var hideOthers = false
+    // The store tab shown with Group by Platform (LibraryStoreTab).
+    @AppStorage(LibraryStoreTab.key) private var storeTab = LibraryStoreTab.all.rawValue
+    private var storeTabs: [LibraryStoreTab] {
+        group == "platform" ? LibraryStoreTab.available(steam: MadeiraDock.enabled && (SteamGamesSection.shown || SteamGamesSection.hasInstalled)) : []
+    }
+    private var currentTab: LibraryStoreTab { LibraryStoreTab.current(storeTab, in: storeTabs) }
     // The sections follow the Steam section's games and sign-in (SteamGames.swift).
     @ObservedObject private var steamGames = SteamGamesModel.shared
     @ObservedObject private var steamLibrary = SteamOwnedLibrary.shared
@@ -3327,7 +3418,7 @@ struct LibraryView: View {
     /// and sorting go game by game, so their order among the Steam games is the
     /// order without them.
     private var focusOrder: [LibraryEntry] {
-        guard group != "platform" else { return entries }
+        guard group != "platform" else { return currentTab.shows(.other) ? entries : [] }
         // A library file edited by hand (or written by a fork) may repeat an id: keep the first.
         let positions = Dictionary(model.entries.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
         let byID = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -3590,6 +3681,7 @@ struct LibraryView: View {
         ScrollViewReader { reader in
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                if !storeTabs.isEmpty { LibraryStoreTabBar(tabs: storeTabs, selection: $storeTab) }
                 desktopButton
                 // The library's sections, as in the fork: Steam (installed and downloading
                 // Steam games, then Not installed), then Other games, the games you added.
@@ -3607,31 +3699,37 @@ struct LibraryView: View {
                         libraryItem(entry, list: list, dense: dense)
                     }
                 } else {
+                // A store tab shows only its own section (LibraryStoreTab).
+                let tab = currentTab
                 let steamFirst = MadeiraDock.enabled && SteamGamesSection.hasInstalled
-                if steamFirst {
+                if steamFirst && tab.shows(.steam) {
                     SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
                                       part: .installed, open: { selected = $0 })
                 }
                 if SteamGamesSection.shown {
-                    VStack(alignment: .leading, spacing: 14) {
-                        // Games are added with the + in the navigation bar.
-                        LibrarySectionHeader(title: L("Other games"), count: entries.count,
-                                             collapsed: SteamGamesSection.collapsible ? $hideOthers : nil) { EmptyView() }
-                        if hideOthers && SteamGamesSection.collapsible {
-                            EmptyView()
-                        } else if entries.isEmpty {
-                            Text(search.isEmpty
-                                 ? "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."
-                                 : L("No other games match your search."))
-                                .foregroundStyle(.secondary)
-                        } else {
-                            cells(entries, width: viewport.size.width)
+                    if tab.shows(.other) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            // Games are added with the + in the navigation bar.
+                            LibrarySectionHeader(title: L("Other games"), count: entries.count,
+                                                 collapsed: SteamGamesSection.collapsible ? $hideOthers : nil) { EmptyView() }
+                            if hideOthers && SteamGamesSection.collapsible {
+                                EmptyView()
+                            } else if entries.isEmpty {
+                                Text(search.isEmpty
+                                     ? L("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")
+                                     : L("No other games match your search."))
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                cells(entries, width: viewport.size.width)
+                            }
                         }
                     }
-                    if MadeiraDock.enabled {
+                    if MadeiraDock.enabled && tab.shows(.steam) {
                         SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
                     }
+                } else if !tab.shows(.other) {
+                    EmptyView()
                 } else if model.entries.filter({ $0.desktop != true && $0.listedInLibrary && $0.steamAppID == nil && $0.epicAppName == nil && $0.gogProductID == nil && $0.itchGameID == nil && $0.eaOfferID == nil && $0.ubisoftSpaceId == nil && $0.ubisoftLaunchId == nil }).isEmpty {
                     ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
@@ -3639,16 +3737,16 @@ struct LibraryView: View {
                 }
                 // The account's GOG games (GOGGames.swift): installed ones open their
                 // Game details page, the others their download sheet.
-                if GOGLibrary.enabled {
+                if GOGLibrary.enabled && tab.shows(.gog) {
                     GOGGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 // The account's itch.io games (ItchGames.swift), the same way.
-                if ItchLibrary.enabled {
+                if ItchLibrary.enabled && tab.shows(.itch) {
                     ItchGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 // The account's Epic Games games (EpicGames.swift): installed ones open their
                 // Game details page, the others their download sheet.
-                if EpicLibrary.enabled {
+                if EpicLibrary.enabled && tab.shows(.epic) {
                     EpicGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 // The account's Ubisoft Connect games (UbisoftGames.swift): installed ones
@@ -3659,7 +3757,7 @@ struct LibraryView: View {
                 }
                 // The account's EA app games (EAGames.swift): installed ones open their
                 // Game details page, the others their download sheet.
-                if EALibrary.enabled {
+                if EALibrary.enabled && tab.shows(.ea) {
                     EAGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 }
@@ -4334,6 +4432,10 @@ struct LibraryDetail: View {
             Toggle(isOn: Binding(get: { bcd.wineVCRT }, set: { on in bcd.wineVCRT = on; LibraryPrefs.setWineVCRT(on, for: entry.windowsPath) })) {
                 compatLabel(L("Wine's C++ runtime"), L("Instead of the game's msvcp/vcruntime"))
             }
+            // Japanese locale (LibraryPrefs.japanese, BCDLaunch.applyExtras, WineProcessBridge.m).
+            Toggle(isOn: Binding(get: { bcd.japanese }, set: { on in bcd.japanese = on; LibraryPrefs.setJapanese(on, for: entry.windowsPath) })) {
+                compatLabel(L("Japanese locale"), L("For Japanese games and visual novels whose text shows as squares or gibberish, or that do not start"))
+            }
             // madeira-bcd: MADEIRA_REAL_SUSPEND for this game (BCDLaunch.realSuspend).
             Picker(selection: Binding(get: { bcd.realSuspend.map { $0 ? 1 : 2 } ?? 0 },
                                       set: { v in bcd.realSuspend = v == 0 ? nil : v == 1; LibraryPrefs.setRealSuspend(bcd.realSuspend, for: entry.windowsPath) })) {
@@ -4606,7 +4708,7 @@ struct LibraryDetail: View {
 /// madeira-bcd: a game's own options as the fork stores them (LibraryDetail):
 /// LibraryPrefs' switches and the GameProfiles.swift file's lines.
 struct BCDGameValues {
-    var avx = false, nvidia = false, olderNvidia = false, wineVCRT = false
+    var avx = false, nvidia = false, olderNvidia = false, wineVCRT = false, japanese = false
     var gpuCard = ""
     var realSuspend: Bool? = nil, unityIL2CPP = false
     var configText = ""
@@ -4617,6 +4719,7 @@ struct BCDGameValues {
         olderNvidia = LibraryPrefs.olderNvidia(windowsPath)
         gpuCard = LibraryPrefs.gpuCard(windowsPath) ?? ""
         wineVCRT = LibraryPrefs.wineVCRT(windowsPath)
+        japanese = LibraryPrefs.japanese(windowsPath)
         realSuspend = LibraryPrefs.realSuspend(windowsPath)
         configText = GameProfile(windowsPath: windowsPath).text
     }
@@ -5552,6 +5655,7 @@ struct LibraryHUD: View {
     }
     @ObservedObject private var model = LibraryModel.shared
     @ObservedObject private var controls = TouchControlsModel.shared
+    @AppStorage(TouchControlStyle.key) private var controlStyle = "glass"
     /// A Madeira Dock start: its status, failure and Show desktop (DockStartScreen).
     @ObservedObject private var dockStart = DockStartScreen.shared
     private let sessionTools = MadeiraConfig.flag("MADEIRA_SESSION_TOOLS")
@@ -5927,6 +6031,12 @@ struct LibraryHUD: View {
                 }
                 LabeledContent("Opacity") { Slider(value: $model.opacity, in: 0.15...1) }
                 LabeledContent("Size") { Slider(value: $controls.sizeScale, in: 0.5...2) }
+                // Glass or an opaque disc (TouchControlStyle); the same choice as Settings › Appearance.
+                LabeledContent("Button style") {
+                    Picker("Button style", selection: $controlStyle) {
+                        ForEach(TouchControlStyle.styles, id: \.id) { Text($0.name).tag($0.id) }
+                    }.pickerStyle(.segmented).frame(maxWidth: 220)
+                }
                 Button("Edit controls", systemImage: "slider.horizontal.3") { controls.visible = true; controls.editing = true; model.menu = false }
                 if GamepadInput.keyboardMouseAvailable {
                     ControllerModeChoice(mode: Binding(get: { model.controllerMode }, set: { model.controllerMode = $0; model.saveCurrentProfile() }))
