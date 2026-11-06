@@ -36,6 +36,33 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      # Host checks upstream's wave-7 sources require this workflow to run
+      # (each check asserts its own step exists here). They are fast source
+      # assertions, so they gate the long build up front.
+      - name: Check eco-native
+        run: python3 tests/host/check-eco-native.py
+
+      - name: Check lean-diag
+        run: python3 tests/host/check-lean-diag.py
+
+      - name: Check power-probe
+        run: python3 tests/host/check-power-probe.py
+
+      - name: Check msc-unbounded-retry
+        run: python3 tests/host/check-msc-unbounded-retry.py
+
+      - name: Check quiet-log
+        run: python3 tests/host/check-quiet-log.py
+
+      - name: Check srv-eco-follow
+        run: python3 tests/host/check-srv-eco-follow.py
+
+      - name: Check srv-fd-reply
+        run: python3 tests/host/check-srv-fd-reply.py
+
+      - name: Check x64-image-nocopy
+        run: python3 tests/host/check-x64-image-nocopy.py
+
       - name: Set up Xcode
         run: |
           developer_dir="$(xcode-select -p 2>/dev/null || true)"
