@@ -10640,6 +10640,43 @@ ULONG_PTR ios_wow_base(void)
     return slot ? slot->base : 0;
 }
 
+/* The window base for a WoW64 unix call's pointer conversion when the
+ * calling thread itself cannot be resolved (ios_wow_base() == 0) but the
+ * session has exactly one live, bound window: that window's base.  A
+ * wow64 call table is only ever bound for a 32-bit caller, so with a
+ * single window in the session the call can only belong to that window's
+ * process.  With zero or several live windows there is no safe guess and
+ * this returns 0, exactly like ios_wow_base().
+ *
+ * Seen on device (Assassin's Creed Revelations, a 32-bit main image):
+ * opengl32's wow64 thread attach runs during early loader init, before
+ * the booting thread's window resolves through ios_wow_slot_current();
+ * ios_wow_host_ptr() then degraded to the identity and get_teb64 read
+ * TEB32->WowTebOffset at the raw guest address 0x7ffc2fdc, below the
+ * 4 GB PAGEZERO, aborting DLL init with c0000142.
+ *
+ * ONLY for pointer conversion inside wow64 unix calls.  Never feed a
+ * per-process identity test with this: ios_wow_base() keeps its strict
+ * meaning (ml1270: a native helper must not borrow another process's
+ * window), and ios_wow_slot_current() is unchanged, so window reserve
+ * and bind behave exactly as before. */
+ULONG_PTR ios_wow_base_sole_window(void)
+{
+    struct ios_wow_window *found = NULL;
+    ULONG_PTR base = ios_wow_base();
+    unsigned i, n = ios_wow_window_count;
+
+    if (base) return base;
+    for (i = 0; i < n; i++)
+    {
+        if (!ios_wow_windows[i].base || !ios_wow_windows[i].peb ||
+            ios_wow_windows[i].leaked || ios_wow_windows[i].dead) continue;
+        if (found) return 0;   /* a second live window: no safe guess */
+        found = &ios_wow_windows[i];
+    }
+    return found ? found->base : 0;
+}
+
 int ios_wow_in_window( const void *addr )
 {
     ULONG_PTR base = ios_wow_base();

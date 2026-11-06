@@ -2,7 +2,7 @@ diff --git a/LICENSE-MADEIRA.md b/LICENSE-MADEIRA.md
 index fd2bc64a9a2..60ee828d969 100644
 --- a/LICENSE-MADEIRA.md
 +++ b/LICENSE-MADEIRA.md
-@@ -58,6 +58,18 @@ distributes under **LGPL-2.1-or-later**. This branch keeps that licence.
+@@ -58,6 +58,25 @@ distributes under **LGPL-2.1-or-later**. This branch keeps that licence.
    - Author spitefulowl, merged on 2026-10-06: `000cac48452` (mscoree iOS:
      cooperative thread suspend and keep-delegates for Wine Mono, pull request
      #26).
@@ -18,6 +18,13 @@ index fd2bc64a9a2..60ee828d969 100644
 +    regenerated `unix_thunks.c`, `unix_private.h`, `unix_wgl.c`). Author:
 +    Connor Gow, written with AI assistance, 2026-09-27. Carried in
 +    `patches/wine-opengl-winios.patch`.
++  - opengl32: WoW64 TEB resolution fallback for early loader init.
++    `get_teb64` retries with the session's sole live guest window
++    (`ios_wow_base_sole_window`, ntdll unix side) when the calling
++    thread's window does not resolve yet, instead of dereferencing the
++    raw guest TEB address (`dlls/opengl32/unix_private.h`). Author:
++    Madeira fork (SaimSuhailQu), written with AI assistance, 2026-11-06.
++    Carried in `patches/wine-opengl-winios.patch`.
  
  The LGPL permits combining this library with proprietary components (such
  as Apple's Metal Shader Converter) subject to LGPL-2.1 section 6; see the
@@ -256,7 +263,7 @@ diff --git a/dlls/opengl32/unix_private.h b/dlls/opengl32/unix_private.h
 index 1eb571e1733..3aa5aa28778 100644
 --- a/dlls/opengl32/unix_private.h
 +++ b/dlls/opengl32/unix_private.h
-@@ -75,19 +75,66 @@ static inline GLsync get_unix_sync( GLsync sync )
+@@ -75,19 +75,87 @@ static inline GLsync get_unix_sync( GLsync sync )
  
  #ifdef _WIN64
  
@@ -314,6 +321,12 @@ index 1eb571e1733..3aa5aa28778 100644
 +extern void madeira_gl_count_call( const char *thunk ) __attribute__((weak));
 +#endif
 +
++#ifdef WINE_IOS
++/* Madeira: ntdll's last-resort window base for a wow64 call whose calling
++ * thread does not resolve yet (early loader init). Weak: absent = NULL. */
++extern ULONG_PTR ios_wow_base_sole_window(void) __attribute__((weak));
++#endif
++
 +#define get_teb64( teb32 ) get_teb64_from( (teb32), __func__ )
 +
 +static inline TEB *get_teb64_from( ULONG teb32, const char *caller )
@@ -324,6 +337,21 @@ index 1eb571e1733..3aa5aa28778 100644
 +    if (madeira_gl_count_call) madeira_gl_count_call( caller );
 +#endif
 +    TEB32 *teb32_ptr = ios_wow_host_ptr( teb32 );
++#ifdef WINE_IOS
++    /* Madeira: ios_wow_host_ptr() degrades to the identity when the calling
++     * thread's window cannot be resolved — during early loader init (this
++     * DLL's thread attach on the booting thread) ios_wow_base() can still
++     * be 0 while the process's window is already bound.  The result is a
++     * guest address below 4 GB, which must never be dereferenced as a host
++     * pointer (Assassin's Creed Revelations: wow64 thread attach read
++     * TEB32->WowTebOffset at 0x7ffc2fdc and aborted DLL init, c0000142).
++     * Fall back to the session's sole live window. */
++    if (teb32 && (ULONG_PTR)teb32_ptr == (ULONG_PTR)teb32 && ios_wow_base_sole_window)
++    {
++        ULONG_PTR sole = ios_wow_base_sole_window();
++        if (sole) teb32_ptr = (TEB32 *)(sole + (ULONG_PTR)teb32);
++    }
++#endif
      return (TEB *)((char *)teb32_ptr + teb32_ptr->WowTebOffset);
  }
  

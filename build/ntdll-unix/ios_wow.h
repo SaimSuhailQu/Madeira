@@ -52,6 +52,13 @@ extern ULONG_PTR ios_wow_base_for_peb( void *peb_id );
  * process, which makes this the per-process "is this a WoW process" test. */
 extern ULONG_PTR ios_wow_base(void);
 
+/* B for a WoW64 unix call's pointer conversion when the calling thread
+ * cannot be resolved: ios_wow_base()'s answer, or — when that is 0 — the
+ * base of the session's sole live, bound window (0 when there is none or
+ * more than one).  For pointer conversion inside wow64 unix calls ONLY;
+ * never a per-process identity test (ios_wow_base keeps that meaning). */
+extern ULONG_PTR ios_wow_base_sole_window(void);
+
 /* Published by the app before __wine_main: nonzero when this session's MAIN
  * image is 32-bit.  virtual_init then arms the session and reserves the main
  * image's window before the system frameworks can take the slot.  0 for a
