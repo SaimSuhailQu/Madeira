@@ -229,6 +229,16 @@ jobs:
           tools/build/build-shader-headers.sh
           build/wine-i386/build.sh
 
+      - name: Build sapi.dll for the farm
+        # The committed farm has no sapi.dll (the SAPI speech server);
+        # upstream rebuilds the farm on a maintainer Mac. Build just that
+        # one module here, into the farm directory build-ipa.sh packages,
+        # using the same llvm-mingw toolchain and the shared (cached)
+        # wine/build-arm64ec tree the build configures anyway. Without it
+        # the SAPI classes' registered server file exists in no prefix and
+        # Assassin's Creed Mirage dies at its logo screen.
+        run: build/wine-pe/build-modules.sh sapi
+
       - name: Run build-ipa.sh
         run: |
           ./tools/build-ipa.sh

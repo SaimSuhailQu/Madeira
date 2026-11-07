@@ -74,6 +74,11 @@ esac
 #   netprofm
 #       the Network List Manager, for services a launcher starts in a game
 #       session
+#   sapi
+#       the SAPI speech server (SpVoice, SpStream). Assassin's Creed Mirage
+#       creates both during startup and uses the result unchecked; the
+#       classes' registered server path is system32\Speech\Common\sapi.dll,
+#       which the farm did not carry, so the classes could not activate
 GAME_MODULES="msvcr70 msvcr71 msvcr80 msvcr90 msvcr100 msvcrt20 msvcrt40 msvcirt
     msvcp60 msvcp70 msvcp71 msvcp80 msvcp90 msvcp100 msvcp120
     vcomp vcomp90 vcomp100 vcomp110 vcomp120 vcomp140
@@ -87,7 +92,7 @@ GAME_MODULES="msvcr70 msvcr71 msvcr80 msvcr90 msvcr100 msvcrt20 msvcrt40 msvcirt
     xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_8 xaudio2_9
     x3daudio1_0 x3daudio1_1 x3daudio1_2 x3daudio1_3 x3daudio1_4 x3daudio1_5 x3daudio1_6
     xapofx1_1 xapofx1_2 xapofx1_3 xapofx1_4
-    d2d1 wmvcore winegstreamer netprofm explorerframe"
+    d2d1 wmvcore winegstreamer netprofm explorerframe sapi"
 # shellcheck disable=SC2086 # the list is split on purpose
 #   tbs                     Unreal Engine shipping executables import it statically
 #   wintypes                Unity IL2CPP GameAssembly.dll imports api-ms-win-core-winrt-robuffer-l1-1-0
